@@ -1,6 +1,13 @@
 #ifndef TOOLS
 #define TOOLS
+#include <string>
 
-class Tool {};
+class Tool {
+private:
+  std::string toolDescription;
+
+public:
+  std::string getToolDescription();
+};
 
 #endif

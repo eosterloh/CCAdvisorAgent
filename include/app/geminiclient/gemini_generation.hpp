@@ -11,7 +11,8 @@ private:
 public:
   GeminiGenerator();
   ~GeminiGenerator();
-  absl::Status geminiGen(std::string_view query);
+  absl::Status geminiGen(std::string_view query,
+                         std::string_view model = "lightweight");
   absl::Status bindTool(std::string_view tool);
   std::string getContent() { return msg_content; }
 };

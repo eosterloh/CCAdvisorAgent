@@ -1,4 +1,5 @@
 #include "../../../include/app/geminiclient/gemini_embedding.hpp"
+#include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "app/geminiclient/gemini_requests.hpp"
@@ -9,7 +10,6 @@
 #include <optional>
 #include <regex>
 #include <string>
-#include <utility>
 #include <vector>
 
 using json = nlohmann::json;
@@ -17,8 +17,10 @@ using json = nlohmann::json;
 GeminiEmbedding::GeminiEmbedding() { GeminiRequests{}; }
 
 namespace {
-std::optional<std::string> ExtractCourseCodeFromUrl(const std::string& source_url) {
-  static const std::regex kCourseRegex("/courses/([A-Z]{2,4}[0-9]{3}(?:\\.[0-9]+)?)");
+std::optional<std::string>
+ExtractCourseCodeFromUrl(const std::string &source_url) {
+  static const std::regex kCourseRegex(
+      "/courses/([A-Z]{2,4}[0-9]{3}(?:\\.[0-9]+)?)");
   std::smatch match;
   if (std::regex_search(source_url, match, kCourseRegex) && match.size() > 1) {
     return match[1].str();
@@ -26,8 +28,8 @@ std::optional<std::string> ExtractCourseCodeFromUrl(const std::string& source_ur
   return std::nullopt;
 }
 
-std::optional<std::string> ExtractCourseCodeFromContent(
-    const std::string& content_text) {
+std::optional<std::string>
+ExtractCourseCodeFromContent(const std::string &content_text) {
   static const std::regex kContentCodeRegex(
       R"(#\s*([A-Z]{2,4}[0-9]{3}(?:\.[0-9]+)?)\s*\n\s*##\s*Download as PDF)");
   std::smatch match;
@@ -38,7 +40,7 @@ std::optional<std::string> ExtractCourseCodeFromContent(
   return std::nullopt;
 }
 
-std::string ExtractCourseTitleFromContent(const std::string& content_text) {
+std::string ExtractCourseTitleFromContent(const std::string &content_text) {
   static const std::regex kTitleRegex(
       R"(##\s*Download as PDF\s*\n\s*##\s*([^\n]+))");
   std::smatch match;
@@ -57,10 +59,10 @@ absl::Status GeminiEmbedding::embed(std::string chunk) {
     return absl::InvalidArgumentError("Cannot embed an empty chunk.");
   }
 
-  const std::string url = absl::StrCat(
-      "https://generativelanguage.googleapis.com/v1beta/models/"
-      "gemini-embedding-2-preview:embedContent?key=",
-      apikey);
+  const std::string url =
+      absl::StrCat("https://generativelanguage.googleapis.com/v1beta/models/"
+                   "gemini-embedding-2-preview:embedContent?key=",
+                   apikey);
 
   const json payload = {{"content", {{"parts", {{{"text", chunk}}}}}}};
 
@@ -69,7 +71,8 @@ absl::Status GeminiEmbedding::embed(std::string chunk) {
       cpr::Body{payload.dump()});
 
   if (r.status_code != 200) {
-    std::cerr << "Error: " << r.status_code << " " << r.text << std::endl;
+    LOG(ERROR) << "Embedding request failed with HTTP " << r.status_code
+               << ", response: " << r.text;
     return absl::InternalError("Embedding request failed.");
   }
 
@@ -83,7 +86,7 @@ absl::Status GeminiEmbedding::embed(std::string chunk) {
     return absl::InternalError("Embedding response missing embedding.values.");
   }
 
-  const json& values_json = response_json["embedding"]["values"];
+  const json &values_json = response_json["embedding"]["values"];
   std::vector<float> current_embedding;
   current_embedding.reserve(values_json.size());
   for (json::const_iterator it = values_json.begin(); it != values_json.end();
@@ -134,7 +137,8 @@ absl::Status GeminiEmbedding::embedFile(std::string filepath) {
       if (res["data"].contains("url") && res["data"]["url"].is_string()) {
         source_text = res["data"]["url"].get<std::string>();
       }
-      if (res["data"].contains("content") && res["data"]["content"].is_string()) {
+      if (res["data"].contains("content") &&
+          res["data"]["content"].is_string()) {
         content_text = res["data"]["content"].get<std::string>();
       }
     } else {
@@ -147,19 +151,19 @@ absl::Status GeminiEmbedding::embedFile(std::string filepath) {
     }
 
     if (content_text.empty()) {
-      return absl::InternalError(
-          absl::StrCat("Missing content on line ", line_number, " in ", filepath));
+      return absl::InternalError(absl::StrCat("Missing content on line ",
+                                              line_number, " in ", filepath));
     }
 
-    const std::string chunk = absl::StrCat(
-        "[source] ", source_text, "\n", "[content] ", content_text, "\n");
+    const std::string chunk = absl::StrCat("[source] ", source_text, "\n",
+                                           "[content] ", content_text, "\n");
     if (apikey.empty()) {
       return absl::InternalError("GEMINI_API_KEY is not set.");
     }
-    const std::string url = absl::StrCat(
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-embedding-2-preview:embedContent?key=",
-        apikey);
+    const std::string url =
+        absl::StrCat("https://generativelanguage.googleapis.com/v1beta/models/"
+                     "gemini-embedding-2-preview:embedContent?key=",
+                     apikey);
 
     const json payload = {{"content", {{"parts", {{{"text", chunk}}}}}}};
     const cpr::Response r = cpr::Post(
@@ -174,18 +178,18 @@ absl::Status GeminiEmbedding::embedFile(std::string filepath) {
     if (response_json.is_discarded() || !response_json.contains("embedding") ||
         !response_json["embedding"].contains("values") ||
         !response_json["embedding"]["values"].is_array()) {
-      return absl::InternalError(
-          absl::StrCat("Malformed embedding response on line ", line_number, "."));
+      return absl::InternalError(absl::StrCat(
+          "Malformed embedding response on line ", line_number, "."));
     }
 
-    const json& values_json = response_json["embedding"]["values"];
+    const json &values_json = response_json["embedding"]["values"];
     std::vector<float> current_embedding;
     current_embedding.reserve(values_json.size());
     for (json::const_iterator it = values_json.begin(); it != values_json.end();
          ++it) {
       if (!it->is_number()) {
-        return absl::InternalError(
-            absl::StrCat("Non-numeric embedding value on line ", line_number, "."));
+        return absl::InternalError(absl::StrCat(
+            "Non-numeric embedding value on line ", line_number, "."));
       }
       current_embedding.push_back(it->get<float>());
     }
@@ -194,7 +198,8 @@ absl::Status GeminiEmbedding::embedFile(std::string filepath) {
     record.source_path = filepath;
     record.source_url = source_text;
     if (is_course_file) {
-      std::optional<std::string> code = ExtractCourseCodeFromContent(content_text);
+      std::optional<std::string> code =
+          ExtractCourseCodeFromContent(content_text);
       if (!code.has_value()) {
         code = ExtractCourseCodeFromUrl(source_text);
       }
@@ -204,6 +209,7 @@ absl::Status GeminiEmbedding::embedFile(std::string filepath) {
       record.course_code = std::nullopt;
       record.course_title = "";
     }
+
     record.chunk_text = chunk;
     record.embedding = current_embedding;
     embedded_records.push_back(record);

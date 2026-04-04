@@ -1,4 +1,5 @@
 #include "../../../include/app/weaviate/weaviate_port.hpp"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "app/common/types.hpp"
 #include "app/geminiclient/gemini_embedding.hpp"
@@ -47,6 +48,8 @@ absl::Status weaviateClient::embed(EmbeddedRecord e) {
   cpr::Header header{{"Content-Type", "application/json"}};
   cpr::Response r = cpr::Post(endpoint, header, body);
   if (r.error || r.status_code >= 400) {
+    LOG(ERROR) << "Weaviate embed request failed. HTTP " << r.status_code
+               << ", transport error: " << r.error.message;
     return absl::InternalError(absl::StrCat("Sending embeddings to database "
                                             "failed: ",
                                             r.error.message, " (HTTP ",
@@ -91,6 +94,8 @@ absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string query) {
   cpr::Header header{{"Content-Type", "application/json"}};
   cpr::Response r = cpr::Post(endpoint, header, body);
   if (r.error || r.status_code >= 400) {
+    LOG(ERROR) << "Weaviate GraphQL request failed. HTTP " << r.status_code
+               << ", transport error: " << r.error.message;
     return absl::InternalError(
         absl::StrCat("GraphQL query failed: ", r.error.message));
   }
@@ -101,6 +106,7 @@ absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string query) {
       !response_json["data"]["Get"].contains("CourseChunk") ||
       !response_json["data"]["Get"]["CourseChunk"].is_array() ||
       response_json["data"]["Get"]["CourseChunk"].empty()) {
+    LOG(ERROR) << "Weaviate GraphQL response missing CourseChunk data.";
     return absl::InternalError("No CourseChunk objects found.");
   }
 

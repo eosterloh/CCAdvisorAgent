@@ -66,6 +66,7 @@ target_include_directories(AdvisorAgBuild PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 
 target_link_libraries(AdvisorAgBuild PRIVATE 
+  absl::log
   absl::strings
   absl::status
   absl::statusor
@@ -85,6 +86,7 @@ add_executable(
 target_include_directories(scraper_script PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 target_link_libraries(scraper_script PRIVATE
+  absl::log
   absl::strings
   absl::status
   absl::statusor
@@ -103,6 +105,7 @@ add_executable(
 target_include_directories(weaviate_tests_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 target_link_libraries(weaviate_tests_runner PRIVATE
+  absl::log
   absl::strings
   absl::status
   absl::statusor
@@ -121,6 +124,7 @@ add_executable(
 target_include_directories(send_data_to_weaviate PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 target_link_libraries(send_data_to_weaviate PRIVATE
+  absl::log
   absl::strings
   absl::status
   absl::statusor

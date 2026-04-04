@@ -14,4 +14,11 @@ struct EmbeddedRecord {
   std::vector<float> embedding;
 };
 
+struct ToolCallingLogs {
+  std::string toolname;
+  std::string summary;
+  bool success;
+  int latency_ms;
+};
+
 #endif

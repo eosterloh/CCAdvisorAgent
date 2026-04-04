@@ -4,6 +4,7 @@
 // hense the or.
 
 #include "absl/status/status.h"
+#include "absl/log/log.h"
 
 #include "tests/gemini_client_tests.hpp"
 #include "tests/tool_calling_tests.hpp"
@@ -17,30 +18,31 @@ int main() {
   std::cout << "Running Gemini client tests...\n";
   const absl::Status gemini_status = RunGeminiClientTests();
   if (!gemini_status.ok()) {
-    std::cerr << gemini_status << "\n";
+    LOG(ERROR) << gemini_status;
     return 1;
   }
 
   std::cout << "Running tool-calling tests...\n";
   const absl::Status tool_status = RunToolCallingTests();
   if (!tool_status.ok()) {
-    std::cerr << tool_status << "\n";
+    LOG(ERROR) << tool_status;
     return 1;
   }
 
   std::cout << "Running Weaviate client tests...\n";
   const absl::Status weaviate_status = RunWeaviateClientTests();
   if (!weaviate_status.ok()) {
-    std::cerr << weaviate_status << "\n";
+    LOG(ERROR) << weaviate_status;
     return 1;
   }
   std::cout << "All selected tests passed.\n";
 
   std::cout << "Intiating chat...";
   chat_manager c;
-  c.getUserInfo(std::cin,
-                std::cout); // Only for input (user typing) - for output
-                            // (printing), use std::cout separately.
-  c.chat(std::cin, std::cout);
+  const absl::Status chat_status = c.chat(std::cin, std::cout);
+  if (!chat_status.ok()) {
+    LOG(ERROR) << chat_status;
+    return 1;
+  }
   return 0;
 }
