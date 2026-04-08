@@ -3,6 +3,8 @@
 #include "absl/strings/str_cat.h"
 #include "app/common/types.hpp"
 #include "app/geminiclient/gemini_generation.hpp"
+#include "app/toolcalling/scraper_tool.hpp"
+#include "app/weaviate/weaviate_port.hpp"
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <utility>
@@ -10,70 +12,10 @@
 using json = nlohmann::json;
 
 namespace {
-constexpr int kMaxToolcalls = 5;
+constexpr int kMaxToolcalls = 10;
 constexpr std::chrono::milliseconds kMaxLatencyDelay =
     std::chrono::milliseconds(5000);
-
-} // namespace
-
-chat_manager::chat_manager() {}
-std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
-  o << user_info;
-}
-
-std::string chat_manager::getPlannerPrompt() {
-  std::string planner_prompt =
-      "You are a planning agent for academic advising.\n"
-      "For every user prompt, do three things:\n"
-      "1) Output tool-calling necessity from 0.0 to 1.0 as the first token.\n"
-      "2) If tools are needed, provide a detailed step-by-step tool plan.\n"
-      "3) Explain why each selected tool is necessary.\n"
-      "Available tools:\n";
-
-  if (availible_tools.empty()) {
-    planner_prompt =
-        absl::StrCat(planner_prompt, "- No tools are currently registered.\n");
-  } else {
-
-    for (Tool &tool : availible_tools) {
-      planner_prompt =
-          absl::StrCat(planner_prompt, tool.getToolDescription(), "\n");
-    }
-  }
-  planner_prompt = absl::StrCat(
-      planner_prompt, "Also, make sure that you put it in json format\n",
-      "Here is the humans prompt:");
-
-  return planner_prompt;
-}
-
-/*
-Ideas for the chat:
-Phase like system
-Phase 1: deterministic quick algorithm like the one above to get the
-user's basic information like major, classes taken ,current
-schedule, and what not Phase 2: Ask questions until there is zero
-ambiguity about what they want to do while in school, do you plan on
-going abroad? What sorts of classes are you interested in taking?
-Phase 3: Allow user to ask questions after getting approiate
-information Give the tools neccessary to respond correctly. The
-whole point of this Is getting the user a good plan so that we
-minimize the Advisors Schedules. Tools we can use: Not enough info
-about a major: scrape through some data try different links as
-supplied by gemini, remeber, have it run a tool and then check the
-output to see if its happy with it. Need a COI/ doesn't meet the
-prerequistites, if the degree of seperation is only 1, we can draft
-an email for the user to send for a COI. If the question is out of
-scope or too complex for the agent sign up to one of the calenders
-of an advisor Finally, hand the user a personalized md or PDF plan
-of what they should be taking. Another thing to note: every call we
-will call a lighter weight model as well to summarize the
-conversation, and pass that thru as input. Final thing to note: For
-every prompt, its a good idea to pull from weaviate everything thats
-relevant for the major. Implement: Plan based on retrieved Take an
-action based on that plan Observe what happens
-*/
-
+constexpr double kToolCallThreshold = .6;
 std::string extractJsonText(std::string preparsed) {
   json content = json::parse(preparsed);
   // Add basic safety checks to avoid exceptions or invalid accesses.
@@ -109,11 +51,46 @@ std::string extractJsonText(std::string preparsed) {
 }
 
 std::vector<Tool> parseOrchResultForTools(std::string result) {
-  // json parse it and turn that into a list of tools
-  // maybe have to overload some cast overload.
+  std::string parsed = extractJsonText(result);
+  if (parsed.empty()) {
+    return {};
+  }
+
+  const json orchestration_json = json::parse(parsed, nullptr, false);
+  if (orchestration_json.is_discarded() ||
+      !orchestration_json.contains("tool_calls") ||
+      !orchestration_json.at("tool_calls").is_array()) {
+    return {};
+  }
+
+  std::vector<Tool> tool_calls;
+  for (const json::value_type &call : orchestration_json.at("tool_calls")) {
+    if (!call.is_object() || !call.contains("tool_name") ||
+        !call.at("tool_name").is_string() || !call.contains("args") ||
+        !call.at("args").is_object()) {
+      continue;
+    }
+
+    const std::string tool_name = call.at("tool_name").get<std::string>();
+    std::string description = tool_name;
+    if (call.contains("tool_description") &&
+        call.at("tool_description").is_string()) {
+      description = call.at("tool_description").get<std::string>();
+    }
+
+    std::string reason = "";
+    if (call.contains("reason") && call.at("reason").is_string()) {
+      reason = call.at("reason").get<std::string>();
+    }
+
+    Tool tool(tool_name, description);
+    tool.setInvocation(call.at("args"), reason);
+    tool_calls.push_back(tool);
+  }
+  return tool_calls;
 }
 
-std::pair<bool, bool> parseDecision(std::string returned) {
+std::pair<bool, bool> parseObserverDecision(std::string returned) {
   std::string parsed = extractJsonText(returned);
   // now this will be in json format:
   json bools = json::parse(parsed);
@@ -125,6 +102,260 @@ std::pair<bool, bool> parseDecision(std::string returned) {
 
 std::string parsePlan(std::string msg) { return extractJsonText(msg); }
 
+std::string summarizeShort(const std::string &convosum,
+                           const std::string &curconversation,
+                           const std::string &user_info, GeminiGenerator &g) {
+  if (curconversation.empty()) {
+    return convosum;
+  }
+  const std::string prompt = absl::StrCat(
+      "Summarize this latest query cycle into a short rolling memory. Keep it "
+      "compact and focused on immediate context, unresolved questions, and "
+      "next "
+      "actions.\n\nExisting short memory:\n",
+      convosum, "\n\nBase user profile:\n", user_info, "\n\nLatest cycle:\n",
+      curconversation, "\n\nReturn plain text only.");
+  const absl::Status status = g.geminiGen(prompt, "lightweight");
+  if (!status.ok()) {
+    return absl::StrCat(convosum, "\n", curconversation);
+  }
+  const std::string extracted = extractJsonText(g.getContent());
+  if (extracted.empty()) {
+    return absl::StrCat(convosum, "\n", curconversation);
+  }
+  return extracted;
+}
+
+std::string summarizeLong(const std::string &convosum,
+                          const std::string &curconversation,
+                          const std::string &user_info, GeminiGenerator &g) {
+  if (curconversation.empty()) {
+    return convosum;
+  }
+  const std::string prompt = absl::StrCat(
+      "Update the long-term advising memory. Preserve stable facts about the "
+      "student (major/minor, constraints, interests, completed/planned "
+      "courses) "
+      "and remove transient details.\n\nExisting long memory:\n",
+      convosum, "\n\nBase user profile:\n", user_info, "\n\nLatest cycle:\n",
+      curconversation, "\n\nReturn plain text only.");
+  const absl::Status status = g.geminiGen(prompt, "lightweight");
+  if (!status.ok()) {
+    return absl::StrCat(convosum, "\n", curconversation);
+  }
+  const std::string extracted = extractJsonText(g.getContent());
+  if (extracted.empty()) {
+    return absl::StrCat(convosum, "\n", curconversation);
+  }
+  return extracted;
+}
+
+bool parseDeciderDecision(std::string conent) {
+  std::string parsed = extractJsonText(conent);
+  if (parsed.empty()) {
+    return false;
+  }
+
+  const json decision_json = json::parse(parsed, nullptr, false);
+  if (decision_json.is_discarded() || !decision_json.contains("done") ||
+      !decision_json.at("done").is_boolean()) {
+    return false;
+  }
+  return decision_json.at("done").get<bool>();
+}
+
+absl::Status makePlanAsPdf(const GeminiGenerator &g, std::string convo_s,
+                           std::string convo_l) {
+
+  // I will implement this myself.
+}
+
+} // namespace
+
+chat_manager::chat_manager() {}
+std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
+  if (!user_info.empty()) {
+    o << "Loaded existing student profile.\n";
+    return user_info;
+  }
+
+  auto ask = [&](const std::string &prompt) -> std::string {
+    o << prompt;
+    std::string answer;
+    std::getline(i, answer);
+    if (answer.empty()) {
+      return "unspecified";
+    }
+    return answer;
+  };
+
+  const std::string student_name = ask("Student name/preferred name: ");
+  const std::string class_year = ask("Class year (e.g. 2027): ");
+  u_advisor = ask("Assigned advisor name/email: ");
+  u_major = ask("Declared/intended major: ");
+  u_minor = ask("Declared/intended minor (or 'none'): ");
+  const std::string completed_courses =
+      ask("Courses completed so far (comma separated): ");
+  const std::string current_courses =
+      ask("Courses currently taking (comma separated): ");
+  const std::string target_courses =
+      ask("Courses you want to take next (comma separated): ");
+  const std::string interests =
+      ask("Academic interests (AI, systems, theory, etc.): ");
+  const std::string constraints =
+      ask("Constraints (time load, athletics, work, abroad, etc.): ");
+  const std::string goals =
+      ask("Primary advising goal for this semester/year: ");
+
+  user_info = absl::StrCat(
+      "Student profile:\n", "- Name: ", student_name, "\n",
+      "- Class year: ", class_year, "\n", "- Advisor: ", u_advisor, "\n",
+      "- Major: ", u_major, "\n", "- Minor: ", u_minor, "\n",
+      "- Completed courses: ", completed_courses, "\n",
+      "- Current courses: ", current_courses, "\n",
+      "- Desired courses: ", target_courses, "\n", "- Interests: ", interests,
+      "\n", "- Constraints: ", constraints, "\n", "- Goal: ", goals, "\n");
+
+  // Seed both memories with the initial profile so planner/responder calls
+  // always have baseline student context.
+  convo_longterm_history = user_info;
+  convo_shortterm_history = user_info;
+  curquery.clear();
+
+  if (availible_tools.empty()) {
+    availible_tools.push_back(
+        Tool("scraper", "Fetches up-to-date page content from a URL."));
+    availible_tools.push_back(
+        Tool("retrieve_from_weaviate",
+             "Retrieves relevant catalog/advising chunks from Weaviate."));
+  }
+
+  o << "\nProfile captured. Starting advising chat.\n";
+  return user_info;
+}
+
+std::string chat_manager::plannerPrompt() {
+  std::string planner_prompt =
+      "You are a planning agent for academic advising.\n"
+      "For every user prompt, do three things:\n"
+      "1) Output tool-calling necessity from 0.0 to 1.0 as the first token.\n"
+      "2) If tools are needed, provide a detailed step-by-step tool plan.\n"
+      "3) Explain why each selected tool is necessary.\n"
+      "Available tools:\n";
+
+  if (availible_tools.empty()) {
+    planner_prompt =
+        absl::StrCat(planner_prompt, "- No tools are currently registered.\n");
+  } else {
+
+    for (Tool &tool : availible_tools) {
+      planner_prompt =
+          absl::StrCat(planner_prompt, tool.getToolDescription(), "\n");
+    }
+  }
+  planner_prompt = absl::StrCat(
+      planner_prompt, "Also, make sure that you put it in json format\n",
+      "User profile:\n", user_info, "\n\nHere is the human's prompt:");
+
+  return planner_prompt;
+}
+
+std::string chat_manager::orchPrompt(std::vector<Tool> tools,
+                                     std::vector<std::string> justifications) {
+  std::string prompt =
+      "You are an orchestrator agent. Convert the planner output into concrete "
+      "tool calls.\n"
+      "Return JSON only with this exact schema:\n"
+      "{\"tool_calls\":[{\"tool_name\":\"...\",\"tool_description\":\"...\","
+      "\"args\":{...},\"reason\":\"...\"}]}\n"
+      "Rules:\n"
+      "- Use only tools listed below.\n"
+      "- Keep args minimal and valid for each tool.\n"
+      "- If no tool is needed, return {\"tool_calls\":[]}.\n\n"
+      "User profile:\n";
+
+  prompt = absl::StrCat(prompt, user_info, "\n\nAvailable tools:\n");
+  for (const Tool &tool : tools) {
+    prompt = absl::StrCat(prompt, "- ", tool.getToolName(), ": ",
+                          tool.getToolDescription(), "\n");
+  }
+
+  if (!justifications.empty()) {
+    prompt = absl::StrCat(prompt, "\nPlanner justifications:\n");
+    for (const std::string &reason : justifications) {
+      prompt = absl::StrCat(prompt, "- ", reason, "\n");
+    }
+  }
+
+  prompt = absl::StrCat(prompt, "\nCurrent user query:\n", curquery);
+  return prompt;
+}
+
+std::string chat_manager::observerPrompt(std::vector<ToolCallingLogs> logs) {
+  std::string prompt =
+      "You are an observer judge. Decide whether another tool call is needed.\n"
+      "Respond in JSON: {\"observer_decision\": bool, \"planner_retry\": "
+      "bool}\n"
+      "Tool logs:\n";
+  for (const ToolCallingLogs &log : logs) {
+    prompt = absl::StrCat(prompt, "- ", log.toolname,
+                          " | success=", log.success ? "true" : "false",
+                          " | latency_ms=", log.latency_ms, " | ", log.summary,
+                          "\n");
+  }
+  return prompt;
+}
+
+std::string chat_manager::responderPrompt(std::string curquery) {
+  return absl::StrCat(
+      "You are a concise academic advising assistant.\n"
+      "Respond directly without tool calls when confidence is high.\n"
+      "If uncertain, ask one clarifying question.\n\n"
+      "User profile:\n",
+      user_info, "\n\nShort-term memory:\n", convo_shortterm_history,
+      "\n\nLong-term memory:\n", convo_longterm_history,
+      "\n\nCurrent user query:\n", curquery, "\n\nReturn plain text only.");
+}
+
+std::string chat_manager::deciderPrompt() {
+  return absl::StrCat(
+      "You are a completion judge for an advising workflow.\n"
+      "Decide if the conversation has enough information to produce a final "
+      "plan.\n"
+      "Return JSON only in this exact shape:\n"
+      "{\"done\": true|false, \"reason\": \"short reason\"}\n\n"
+      "User profile:\n",
+      user_info, "\n\nShort-term memory:\n", convo_shortterm_history,
+      "\n\nLong-term memory:\n", convo_longterm_history, "\n\nCurrent query:\n",
+      curquery);
+}
+/*
+Ideas for the chat:
+Phase like system
+Phase 1: deterministic quick algorithm like the one above to get the
+user's basic information like major, classes taken ,current
+schedule, and what not Phase 2: Ask questions until there is zero
+ambiguity about what they want to do while in school, do you plan on
+going abroad? What sorts of classes are you interested in taking?
+Phase 3: Allow user to ask questions after getting approiate
+information Give the tools neccessary to respond correctly. The
+whole point of this Is getting the user a good plan so that we
+minimize the Advisors Schedules. Tools we can use: Not enough info
+about a major: scrape through some data try different links as
+supplied by gemini, remeber, have it run a tool and then check the
+output to see if its happy with it. Need a COI/ doesn't meet the
+prerequistites, if the degree of seperation is only 1, we can draft
+an email for the user to send for a COI. If the question is out of
+scope or too complex for the agent sign up to one of the calenders
+of an advisor Finally, hand the user a personalized md or PDF plan
+of what they should be taking. Another thing to note: every call we
+will call a lighter weight model as well to summarize the
+conversation, and pass that thru as input. Final thing to note: For
+every prompt, its a good idea to pull from weaviate everything thats
+relevant for the major. Implement: Plan based on retrieved Take an
+action based on that plan Observe what happens
+*/
+
 std::string chat_manager::getSummarization() { return convo_shortterm_history; }
 
 absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
@@ -135,20 +366,26 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
   GeminiGenerator g;
   getUserInfo(i, o);
   absl::Status curstatus = absl::OkStatus();
+  int query_number = 0;
   // Add logs for each of these steps
   while (curstatus.ok()) {
     std::getline(i, curquery);
+    std::string curconversation = "";
+    ++query_number;
+    curconversation =
+        absl::StrCat("Query #", query_number, "\n", curquery, "\n");
     // planner part
     //  decides where a tool call is neccessary or
     // just needs to respond or something.
     // we will use gemini 3.0 pro for this
-    std::string planner_prompt = getPlannerPrompt();
-    curstatus =
-        g.geminiGen(absl::StrCat(planner_prompt, curquery, getUserInfo()));
+    std::string planner_prompt = plannerPrompt();
+    curstatus = g.geminiGen(absl::StrCat(planner_prompt, "\n", curquery));
     if (!curstatus.ok()) {
       return curstatus;
     }
     std::string plan = parsePlan(g.getContent());
+    curconversation =
+        absl::StrCat(curconversation, "Planned to do ", plan, "\n");
     float tool_calling_threshold;
     std::vector<Tool> tools_to_use;
     std::vector<std::string> explaination_for_use;
@@ -157,16 +394,15 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     // while loop for orchestrator//observer
     // this only happens if the planner deemed the tool call
     // neccessary
-    if (tool_calling_threshold >= .5) {
+    if (tool_calling_threshold >= kToolCallThreshold) {
       bool observerDecision = true;
       bool plannerRetry = false;
       int curToolCalls = 0;
       while (observerDecision || curToolCalls <= kMaxToolcalls) {
         if (plannerRetry) {
           // set up the planning agent again.
-          std::string planner_prompt = getPlannerPrompt();
-          curstatus = g.geminiGen(
-              absl::StrCat(planner_prompt, curquery, getUserInfo()));
+          std::string planner_prompt = plannerPrompt();
+          curstatus = g.geminiGen(absl::StrCat(planner_prompt, "\n", curquery));
           std::string plan = parsePlan(g.getContent());
         }
         std::string orchestrator_prompt =
@@ -175,16 +411,82 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
         std::vector<Tool> order = parseOrchResultForTools(g.getContent());
         std::vector<ToolCallingLogs> logs;
         for (Tool &tool : order) {
-
           if (curToolCalls >= kMaxToolcalls) {
             break;
           }
+
+          ToolCallingLogs log_entry;
+          log_entry.toolname = tool.getToolName();
+          log_entry.success = false;
+          log_entry.summary = "Tool not executed.";
+          log_entry.latency_ms = 0;
+          const auto started = std::chrono::steady_clock::now();
+
+          if (!tool.hasInvocation()) {
+            log_entry.summary = "Skipped: missing invocation payload.";
+            logs.push_back(log_entry);
+            ++curToolCalls;
+            continue;
+          }
+
+          const json &args = tool.getInvocationArgs();
+          if (tool.getToolName() == "scraper") {
+            if (!args.contains("url") || !args.at("url").is_string()) {
+              log_entry.summary = "Skipped: scraper call missing string url.";
+            } else {
+              Scraper scraper(true);
+              absl::StatusOr<std::string> scrape_or =
+                  scraper.scrapeFromUrl(args.at("url").get<std::string>());
+              if (scrape_or.ok()) {
+                log_entry.success = true;
+                log_entry.summary = absl::StrCat(
+                    "Scraper succeeded. Response size=", scrape_or->size(),
+                    " chars.");
+              } else {
+                log_entry.summary =
+                    absl::StrCat("Scraper failed: ", scrape_or.status());
+              }
+            }
+          } else if (tool.getToolName() == "retrieve_from_weaviate") {
+            if (!args.contains("query") || !args.at("query").is_string()) {
+              log_entry.summary =
+                  "Skipped: retrieve_from_weaviate missing string query.";
+            } else {
+              weaviateClient client;
+              absl::StatusOr<EmbeddedRecord> retrieval_or =
+                  client.retreive(args.at("query").get<std::string>());
+              if (retrieval_or.ok()) {
+                log_entry.success = true;
+                log_entry.summary =
+                    absl::StrCat("Weaviate retrieval succeeded from ",
+                                 retrieval_or->source_url, ".");
+              } else {
+                log_entry.summary = absl::StrCat("Weaviate retrieval failed: ",
+                                                 retrieval_or.status());
+              }
+            }
+          } else {
+            log_entry.summary = absl::StrCat("Skipped: unknown tool '",
+                                             tool.getToolName(), "'.");
+          }
+
+          const auto ended = std::chrono::steady_clock::now();
+          log_entry.latency_ms = static_cast<int>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(ended -
+                                                                    started)
+                  .count());
+          logs.push_back(log_entry);
+          curconversation =
+              absl::StrCat(curconversation, "called tool: ", tool.getToolName(),
+                           " -> ", log_entry.summary, "\n");
+          ++curToolCalls;
         }
         // After this happens, give the logs to an observer judge
 
-        std::string observer_prompt = getObserverPrompt(logs);
+        std::string observer_prompt = observerPrompt(logs);
         err = g.geminiGen(observer_prompt);
-        std::pair<bool, bool> observerResults = parseDecision(g.getContent());
+        std::pair<bool, bool> observerResults =
+            parseObserverDecision(g.getContent());
 
         observerDecision = observerResults.first;
         plannerRetry = observerResults.second;
@@ -192,27 +494,47 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
         //  result, if not, lets ot back to the planning stages
       }
       // summarize the conversation be like: heres what I did.
-      convo_longterm_history = summarizeLong(convo_longterm_history);
-      convo_shortterm_history = summarizeShort(convo_shortterm_history);
+      // format:
+      // Query #X
+      // query
+      // Planned to do blah
+      // called tool: blah
+      // end of current query
+      curconversation = absl::StrCat(curconversation, "end of current query\n");
+      convo_longterm_history =
+          summarizeLong(convo_longterm_history, curconversation, user_info, g);
+      convo_shortterm_history = summarizeShort(convo_shortterm_history,
+                                               curconversation, user_info, g);
 
       // another agent call: heres what I did.
       o << getSummarization() << "\n";
     } else {
       // Responder agent.
       //  if we do nothing we should respond
-      std::string responder_prompt = getResponderPrompt();
+      std::string responder_prompt = responderPrompt(curquery);
       curstatus = g.geminiGen(responder_prompt);
+      curconversation = absl::StrCat(
+          curconversation, "Planned to do respond directly without tools.\n",
+          "end of current query\n");
 
-      convo_longterm_history = summarizeLong(convo_longterm_history);
-      convo_shortterm_history = summarizeShort(convo_shortterm_history);
+      convo_longterm_history =
+          summarizeLong(convo_longterm_history, curconversation, user_info, g);
+      convo_shortterm_history = summarizeShort(convo_shortterm_history,
+                                               curconversation, user_info, g);
       // Summarizer summarizes this conversation twice: in the conte
       // xt of the whole thing and in the short term conversation
     }
     // finally, the decider judge, decides from the content if a proper plan
     //  cna be made and there is no ambiguity in a list of things.
 
+    std::string decider_prompt = deciderPrompt();
+    curstatus = g.geminiGen(decider_prompt);
+    std::string decider_result = g.getContent();
+    bool done = parseDeciderDecision(decider_result);
+
     if (done) {
-      makePlanAsPdf();
+      curstatus =
+          makePlanAsPdf(g, convo_longterm_history, convo_longterm_history);
       break;
     }
   }

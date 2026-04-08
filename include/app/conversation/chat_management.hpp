@@ -18,12 +18,13 @@ private:
   std::string u_minor;
   std::string curquery;
   std::string getUserInfo(std::istream &i, std::ostream &o);
-  std::string getPlannerPrompt();
+  std::string plannerPrompt();
   std::string orchPrompt(std::vector<Tool> tools,
                          std::vector<std::string> justifications);
   std::string observerPrompt(std::vector<ToolCallingLogs> logs);
   std::string responderPrompt(std::string curquery);
-  std::string getUserInfo();
+  std::string
+  deciderPrompt(); // will really just use the convo history to decide this.
   std::string getSummarization();
 
 public:

@@ -56,3 +56,6 @@ compile_commands.json
 .vscode/
 .idea/
 *.log
+
+.cache/
+.cache/*
