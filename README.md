@@ -154,3 +154,28 @@ Notes:
 - Add retrieval filtering/reranking and confidence thresholds
 - Build eval sets for accuracy, citation quality, and safe escalation
 - Add prerequisite extraction enrichment from linked course pages
+
+
+Set up:
+
+copy .env-example into .env and get API keys for all listed values
+
+run these commands:
+
+``` bash
+set -a 
+source .env
+set +a
+
+Cmake stuff: 
+
+bash scripts/populate_data_file.sh
+bash scripts/configure_weaviate.sh
+
+cd docker
+docker compose up -d
+cd ..
+
+
+
+```

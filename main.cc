@@ -13,6 +13,7 @@
 #include "include/app/conversation/chat_management.hpp"
 
 #include <iostream>
+#include <string>
 
 int main() {
   std::cout << "Running Gemini client tests...\n";
@@ -37,7 +38,17 @@ int main() {
   }
   std::cout << "All selected tests passed.\n";
 
-  std::cout << "Intiating chat...";
+  std::cout << "\n=== Chat Sandbox ===\n";
+  std::cout << "Type 'chat' to launch the interactive advisor, or press Enter "
+               "to exit: ";
+  std::string launch_choice;
+  std::getline(std::cin, launch_choice);
+  if (launch_choice != "chat") {
+    std::cout << "Skipping chat sandbox.\n";
+    return 0;
+  }
+
+  std::cout << "Initiating chat...\n";
   chat_manager c;
   const absl::Status chat_status = c.chat(std::cin, std::cout);
   if (!chat_status.ok()) {

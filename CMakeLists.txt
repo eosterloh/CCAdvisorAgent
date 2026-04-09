@@ -55,6 +55,7 @@ add_executable(
   tests/gemini_client_tests.cc
   tests/tool_calling_tests.cc
   tests/weaviate_client_tests.cc
+  src/app/conversation/chat_management.cc
   src/app/toolcalling/scraper_tool.cc
   src/app/geminiclient/gemini_generation.cc
   src/app/geminiclient/gemini_requests.cc

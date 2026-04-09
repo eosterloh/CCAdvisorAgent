@@ -6,7 +6,9 @@
 #include "app/toolcalling/scraper_tool.hpp"
 #include "app/weaviate/weaviate_port.hpp"
 #include <chrono>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <utility>
 #include <vector>
 using json = nlohmann::json;
@@ -164,10 +166,52 @@ bool parseDeciderDecision(std::string conent) {
   return decision_json.at("done").get<bool>();
 }
 
-absl::Status makePlanAsPdf(const GeminiGenerator &g, std::string convo_s,
+absl::Status makePlanAsPdf(GeminiGenerator &g, std::string convo_s,
                            std::string convo_l) {
+  std::ofstream plan("plan.md");
+  if (!plan.is_open()) {
+    return absl::InternalError("Failed to open plan.md for writing.");
+  }
 
-  // I will implement this myself.
+  const std::string prompt = absl::StrCat(
+      "Write a finalized academic advising plan as valid markdown.\n"
+      "Preserve markdown structure and include these exact sections:\n"
+      "# Academic Plan\n"
+      "## Student Profile\n"
+      "## Recommended Course Path\n"
+      "## Risks and Open Questions\n"
+      "## Next Actions\n"
+      "Use concise bullets where appropriate.\n"
+      "Do not wrap output in code fences.\n\n"
+      "Short-term conversation memory:\n",
+      convo_s, "\n\nLong-term conversation memory:\n", convo_l);
+
+  const absl::Status status = g.geminiGen(prompt, "lightweight");
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::string markdown = extractJsonText(g.getContent());
+  if (markdown.empty()) {
+    markdown = "# Academic Plan\n\n"
+               "## Student Profile\n"
+               "- Unable to auto-generate profile summary.\n\n"
+               "## Recommended Course Path\n"
+               "- Unable to auto-generate recommendations.\n\n"
+               "## Risks and Open Questions\n"
+               "- Generation output was empty.\n\n"
+               "## Next Actions\n"
+               "- Re-run planning with more context.\n";
+  }
+
+  // Write line-by-line so Markdown layout is preserved exactly.
+  std::istringstream in(markdown);
+  std::string line;
+  while (std::getline(in, line)) {
+    plan << line << '\n';
+  }
+  plan.close();
+  return absl::OkStatus();
 }
 
 } // namespace
