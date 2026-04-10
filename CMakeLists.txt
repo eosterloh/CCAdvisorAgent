@@ -57,10 +57,12 @@ add_executable(
   tests/weaviate_client_tests.cc
   src/app/conversation/chat_management.cc
   src/app/toolcalling/scraper_tool.cc
+  src/app/toolcalling/retrieve_from_weaviate.cc
   src/app/geminiclient/gemini_generation.cc
   src/app/geminiclient/gemini_requests.cc
   src/app/geminiclient/gemini_embedding.cc
   src/app/weaviate/weaviate_port.cc
+  src/app/weaviate/reranker.cc
 )
 
 target_include_directories(AdvisorAgBuild PRIVATE ${CMAKE_SOURCE_DIR}/include)

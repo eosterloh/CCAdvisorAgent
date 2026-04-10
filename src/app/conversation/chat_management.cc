@@ -3,8 +3,8 @@
 #include "absl/strings/str_cat.h"
 #include "app/common/types.hpp"
 #include "app/geminiclient/gemini_generation.hpp"
+#include "app/toolcalling/retrieve_from_weaviate.hpp"
 #include "app/toolcalling/scraper_tool.hpp"
-#include "app/weaviate/weaviate_port.hpp"
 #include <chrono>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -19,37 +19,54 @@ constexpr std::chrono::milliseconds kMaxLatencyDelay =
     std::chrono::milliseconds(5000);
 constexpr double kToolCallThreshold = .6;
 std::string extractJsonText(std::string preparsed) {
-  json content = json::parse(preparsed);
-  // Add basic safety checks to avoid exceptions or invalid accesses.
-  if (!content.contains("candidates") || !content.at("candidates").is_array() ||
-      content.at("candidates").empty()) {
-    return "";
-  }
-  const json::value_type &candidates = content.at("candidates");
-  if (!candidates.at(0).contains("content") ||
-      !candidates.at(0).at("content").is_array() ||
-      candidates.at(0).at("content").empty()) {
-    return "";
-  }
-  const json::value_type &candidate_content = candidates.at(0).at("content");
-  if (!candidate_content.at(0).contains("parts") ||
-      !candidate_content.at(0).at("parts").is_array() ||
-      candidate_content.at(0).at("parts").empty()) {
-    return "";
-  }
-  const json::value_type &parts = candidate_content.at(0).at("parts");
-  if (!parts.at(0).contains("text") || !parts.at(0).at("text").is_string()) {
+  const json root = json::parse(preparsed, nullptr, false);
+  if (root.is_discarded()) {
     return "";
   }
 
-  std::string textcontent = content.at("candidates")
-                                .at(0)
-                                .at("content")
-                                .at(0)
-                                .at("parts")
-                                .at(0)
-                                .at("text");
-  return textcontent;
+  if (!root.contains("candidates") || !root.at("candidates").is_array() ||
+      root.at("candidates").empty()) {
+    return "";
+  }
+
+  const json::value_type &candidate = root.at("candidates").at(0);
+  if (!candidate.contains("content")) {
+    return "";
+  }
+
+  // Most common Gemini shape:
+  // candidates[0].content.parts[0].text
+  if (candidate.at("content").is_object()) {
+    const json::value_type &content_obj = candidate.at("content");
+    if (!content_obj.contains("parts") || !content_obj.at("parts").is_array() ||
+        content_obj.at("parts").empty()) {
+      return "";
+    }
+    const json::value_type &first_part = content_obj.at("parts").at(0);
+    if (!first_part.contains("text") || !first_part.at("text").is_string()) {
+      return "";
+    }
+    return first_part.at("text").get<std::string>();
+  }
+
+  // Fallback for older/alternate shape your code previously assumed:
+  // candidates[0].content[0].parts[0].text
+  if (candidate.at("content").is_array() && !candidate.at("content").empty()) {
+    const json::value_type &first_content = candidate.at("content").at(0);
+    if (!first_content.contains("parts") ||
+        !first_content.at("parts").is_array() ||
+        first_content.at("parts").empty()) {
+      return "";
+    }
+    const json::value_type &first_part = first_content.at("parts").at(0);
+    if (!first_part.contains("text") || !first_part.at("text").is_string()) {
+      return "";
+    }
+    return first_part.at("text").get<std::string>();
+  }
+
+  // Unexpected content shape.
+  return "RAHHHH";
 }
 
 std::vector<Tool> parseOrchResultForTools(std::string result) {
@@ -103,6 +120,105 @@ std::pair<bool, bool> parseObserverDecision(std::string returned) {
 }
 
 std::string parsePlan(std::string msg) { return extractJsonText(msg); }
+
+double parseToolCallingThreshold(const std::string &plan_text) {
+  if (plan_text.empty()) {
+    return 0.0;
+  }
+
+  const json plan_json = json::parse(plan_text, nullptr, false);
+  if (!plan_json.is_discarded() &&
+      plan_json.contains("tool_calling_necessity")) {
+    const json &necessity = plan_json.at("tool_calling_necessity");
+    if (necessity.is_number()) {
+      const double value = necessity.get<double>();
+      if (value >= 0.0 && value <= 1.0) {
+        return value;
+      }
+    }
+  }
+
+  std::istringstream parser(plan_text);
+  double first_token_value = 0.0;
+  if ((parser >> first_token_value) && first_token_value >= 0.0 &&
+      first_token_value <= 1.0) {
+    return first_token_value;
+  }
+
+  return 0.0;
+}
+
+void updateToolsFromPlannerPlan(const std::string &plan_text,
+                                const std::vector<Tool> &available_tools,
+                                std::vector<Tool> *tools_to_use,
+                                std::vector<std::string> *justifications) {
+  tools_to_use->clear();
+  justifications->clear();
+  if (plan_text.empty()) {
+    return;
+  }
+
+  auto add_tool_if_known = [&](const std::string &name,
+                               const std::string &reason) {
+    for (const Tool &available : available_tools) {
+      if (available.getToolName() == name) {
+        tools_to_use->push_back(
+            Tool(available.getToolName(), available.getToolDescription()));
+        if (!reason.empty()) {
+          justifications->push_back(reason);
+        }
+        return;
+      }
+    }
+  };
+
+  const json plan_json = json::parse(plan_text, nullptr, false);
+  if (!plan_json.is_discarded() && plan_json.is_object() &&
+      plan_json.contains("tools_to_use") &&
+      plan_json.at("tools_to_use").is_array()) {
+    for (const json::value_type &tool_entry : plan_json.at("tools_to_use")) {
+      if (tool_entry.is_string()) {
+        add_tool_if_known(tool_entry.get<std::string>(), "");
+        continue;
+      }
+      if (!tool_entry.is_object()) {
+        continue;
+      }
+
+      std::string tool_name = "";
+      if (tool_entry.contains("tool_name") &&
+          tool_entry.at("tool_name").is_string()) {
+        tool_name = tool_entry.at("tool_name").get<std::string>();
+      } else if (tool_entry.contains("name") &&
+                 tool_entry.at("name").is_string()) {
+        tool_name = tool_entry.at("name").get<std::string>();
+      }
+      if (tool_name.empty()) {
+        continue;
+      }
+
+      std::string reason = "";
+      if (tool_entry.contains("justification") &&
+          tool_entry.at("justification").is_string()) {
+        reason = tool_entry.at("justification").get<std::string>();
+      } else if (tool_entry.contains("reason") &&
+                 tool_entry.at("reason").is_string()) {
+        reason = tool_entry.at("reason").get<std::string>();
+      }
+      add_tool_if_known(tool_name, reason);
+    }
+  }
+
+  // Fallback: if planner format is loose text, infer tools by name mention.
+  if (tools_to_use->empty()) {
+    for (const Tool &available : available_tools) {
+      if (plan_text.find(available.getToolName()) != std::string::npos) {
+        tools_to_use->push_back(
+            Tool(available.getToolName(), available.getToolDescription()));
+      }
+    }
+  }
+}
 
 std::string summarizeShort(const std::string &convosum,
                            const std::string &curconversation,
@@ -240,8 +356,8 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   u_minor = ask("Declared/intended minor (or 'none'): ");
   const std::string completed_courses =
       ask("Courses completed so far (comma separated): ");
-  const std::string current_courses =
-      ask("Courses currently taking (comma separated): ");
+  const std::string current_course = ask(
+      "Current course (Colorado College students take one course at a time): ");
   const std::string target_courses =
       ask("Courses you want to take next (comma separated): ");
   const std::string interests =
@@ -256,7 +372,7 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
       "- Class year: ", class_year, "\n", "- Advisor: ", u_advisor, "\n",
       "- Major: ", u_major, "\n", "- Minor: ", u_minor, "\n",
       "- Completed courses: ", completed_courses, "\n",
-      "- Current courses: ", current_courses, "\n",
+      "- Current course: ", current_course, "\n",
       "- Desired courses: ", target_courses, "\n", "- Interests: ", interests,
       "\n", "- Constraints: ", constraints, "\n", "- Goal: ", goals, "\n");
 
@@ -430,9 +546,11 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     std::string plan = parsePlan(g.getContent());
     curconversation =
         absl::StrCat(curconversation, "Planned to do ", plan, "\n");
-    float tool_calling_threshold;
+    const double tool_calling_threshold = parseToolCallingThreshold(plan);
     std::vector<Tool> tools_to_use;
     std::vector<std::string> explaination_for_use;
+    updateToolsFromPlannerPlan(plan, availible_tools, &tools_to_use,
+                               &explaination_for_use);
 
     // sends plan to orchestrator which handles the tool calls
     // while loop for orchestrator//observer
@@ -442,16 +560,39 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
       bool observerDecision = true;
       bool plannerRetry = false;
       int curToolCalls = 0;
-      while (observerDecision || curToolCalls <= kMaxToolcalls) {
+      while (observerDecision && curToolCalls <= kMaxToolcalls) {
+        bool latencyExceededThisCycle = false;
         if (plannerRetry) {
           // set up the planning agent again.
           std::string planner_prompt = plannerPrompt();
           curstatus = g.geminiGen(absl::StrCat(planner_prompt, "\n", curquery));
-          std::string plan = parsePlan(g.getContent());
+          if (!curstatus.ok()) {
+            return curstatus;
+          }
+          plan = parsePlan(g.getContent());
+          updateToolsFromPlannerPlan(plan, availible_tools, &tools_to_use,
+                                     &explaination_for_use);
+          curconversation =
+              absl::StrCat(curconversation, "Planned to do ", plan, "\n");
         }
         std::string orchestrator_prompt =
             orchPrompt(tools_to_use, explaination_for_use);
+        const auto orchestrator_started = std::chrono::steady_clock::now();
         absl::Status err = g.geminiGen(orchestrator_prompt);
+        const auto orchestrator_ended = std::chrono::steady_clock::now();
+        const auto orchestrator_latency =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                orchestrator_ended - orchestrator_started);
+        if (!err.ok()) {
+          return err;
+        }
+        if (orchestrator_latency > kMaxLatencyDelay) {
+          latencyExceededThisCycle = true;
+          curconversation =
+              absl::StrCat(curconversation, "called tool: orchestrator -> ",
+                           "Latency exceeded ", orchestrator_latency.count(),
+                           "ms (limit ", kMaxLatencyDelay.count(), "ms)\n");
+        }
         std::vector<Tool> order = parseOrchResultForTools(g.getContent());
         std::vector<ToolCallingLogs> logs;
         for (Tool &tool : order) {
@@ -496,14 +637,13 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
               log_entry.summary =
                   "Skipped: retrieve_from_weaviate missing string query.";
             } else {
-              weaviateClient client;
-              absl::StatusOr<EmbeddedRecord> retrieval_or =
-                  client.retreive(args.at("query").get<std::string>());
+              absl::StatusOr<std::string> retrieval_or =
+                  retrieveFromWeaviate(args.at("query").get<std::string>());
               if (retrieval_or.ok()) {
                 log_entry.success = true;
-                log_entry.summary =
-                    absl::StrCat("Weaviate retrieval succeeded from ",
-                                 retrieval_or->source_url, ".");
+                log_entry.summary = absl::StrCat(
+                    "Weaviate retrieval + rerank succeeded. Output size=",
+                    retrieval_or->size(), " chars.");
               } else {
                 log_entry.summary = absl::StrCat("Weaviate retrieval failed: ",
                                                  retrieval_or.status());
@@ -519,6 +659,13 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
               std::chrono::duration_cast<std::chrono::milliseconds>(ended -
                                                                     started)
                   .count());
+          if (log_entry.latency_ms > kMaxLatencyDelay.count()) {
+            latencyExceededThisCycle = true;
+            log_entry.success = false;
+            log_entry.summary = absl::StrCat(
+                log_entry.summary, " | latency exceeded ", log_entry.latency_ms,
+                "ms (limit ", kMaxLatencyDelay.count(), "ms)");
+          }
           logs.push_back(log_entry);
           curconversation =
               absl::StrCat(curconversation, "called tool: ", tool.getToolName(),
@@ -528,12 +675,27 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
         // After this happens, give the logs to an observer judge
 
         std::string observer_prompt = observerPrompt(logs);
+        const auto observer_started = std::chrono::steady_clock::now();
         err = g.geminiGen(observer_prompt);
+        const auto observer_ended = std::chrono::steady_clock::now();
+        const auto observer_latency =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                observer_ended - observer_started);
+        if (!err.ok()) {
+          return err;
+        }
+        if (observer_latency > kMaxLatencyDelay) {
+          latencyExceededThisCycle = true;
+          curconversation =
+              absl::StrCat(curconversation, "called tool: observer -> ",
+                           "Latency exceeded ", observer_latency.count(),
+                           "ms (limit ", kMaxLatencyDelay.count(), "ms)\n");
+        }
         std::pair<bool, bool> observerResults =
             parseObserverDecision(g.getContent());
 
-        observerDecision = observerResults.first;
-        plannerRetry = observerResults.second;
+        observerDecision = observerResults.first || latencyExceededThisCycle;
+        plannerRetry = observerResults.second || latencyExceededThisCycle;
         // should probably do two things, see if this reached the desired
         //  result, if not, lets ot back to the planning stages
       }
@@ -578,10 +740,13 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
 
     if (done) {
       curstatus =
-          makePlanAsPdf(g, convo_longterm_history, convo_longterm_history);
+          makePlanAsPdf(g, convo_shortterm_history, convo_longterm_history);
       break;
     }
   }
   return absl::OkStatus();
   // end condition: When we finalize the plan for the user
 }
+
+// What I am missing:
+// Need to pull data from weaviate
