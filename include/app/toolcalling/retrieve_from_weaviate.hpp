@@ -3,7 +3,8 @@
 
 #include "absl/status/statusor.h"
 #include <string>
+#include <string_view>
 
-absl::StatusOr<std::string> retrieveFromWeaviate(const std::string &query);
+absl::StatusOr<std::string> retrieveFromWeaviate(std::string_view query);
 
 #endif

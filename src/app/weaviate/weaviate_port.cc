@@ -12,9 +12,11 @@
 using json = nlohmann::json;
 
 std::string weaviateClient::HashRecordKey(const EmbeddedRecord &record) const {
-  const std::string key = absl::StrCat(record.source_url, "|", record.chunk_text);
+  const std::string key =
+      absl::StrCat(record.source_url, "|", record.chunk_text);
   const std::size_t h1 = std::hash<std::string>{}(key);
-  const std::size_t h2 = std::hash<std::string>{}(absl::StrCat("ccadvisor|", key));
+  const std::size_t h2 =
+      std::hash<std::string>{}(absl::StrCat("ccadvisor|", key));
 
   std::ostringstream stream;
   stream << std::hex << h1 << h2;
@@ -31,7 +33,7 @@ std::string weaviateClient::HashRecordKey(const EmbeddedRecord &record) const {
                       hex.substr(20, 12));
 }
 
-absl::Status weaviateClient::embed(EmbeddedRecord e) {
+absl::Status weaviateClient::embed(const EmbeddedRecord &e) {
   cpr::Url endpoint = "http://localhost:8080/v1/objects";
   const std::string object_id = HashRecordKey(e);
 
@@ -49,17 +51,19 @@ absl::Status weaviateClient::embed(EmbeddedRecord e) {
   cpr::Response r = cpr::Post(endpoint, header, body);
   if (r.error || r.status_code >= 400) {
     LOG(ERROR) << "Weaviate embed request failed. HTTP " << r.status_code
-               << ", transport error: " << r.error.message;
-    return absl::InternalError(absl::StrCat("Sending embeddings to database "
-                                            "failed: ",
-                                            r.error.message, " (HTTP ",
-                                            r.status_code, ")"));
+               << ", transport error: " << r.error.message
+               << ", response body: " << r.text;
+    return absl::InternalError(absl::StrCat(
+        "Sending embeddings to database "
+        "failed: ",
+        r.error.message, " (HTTP ", r.status_code, ") ", "body=", r.text));
   } else {
     return absl::OkStatus();
   }
 }
 
-absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string query) {
+absl::StatusOr<EmbeddedRecord>
+weaviateClient::retreive(std::string_view query) {
   GeminiEmbedding embedder;
   const absl::Status embed_status = embedder.embed(query);
   if (!embed_status.ok()) {
@@ -95,9 +99,11 @@ absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string query) {
   cpr::Response r = cpr::Post(endpoint, header, body);
   if (r.error || r.status_code >= 400) {
     LOG(ERROR) << "Weaviate GraphQL request failed. HTTP " << r.status_code
-               << ", transport error: " << r.error.message;
+               << ", transport error: " << r.error.message
+               << ", response body: " << r.text;
     return absl::InternalError(
-        absl::StrCat("GraphQL query failed: ", r.error.message));
+        absl::StrCat("GraphQL query failed: ", r.error.message, " (HTTP ",
+                     r.status_code, ") body=", r.text));
   }
 
   const json response_json = json::parse(r.text, nullptr, false);

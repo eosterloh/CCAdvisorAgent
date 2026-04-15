@@ -39,17 +39,21 @@ int main() {
   std::cout << "All selected tests passed.\n";
 
   std::cout << "\n=== Chat Sandbox ===\n";
-  std::cout << "Type 'chat' to launch the interactive advisor, or press Enter "
-               "to exit: ";
+  std::cout << "Type 'chat' for normal onboarding, 'test' for preset profile, "
+               "or press Enter to exit: ";
   std::string launch_choice;
   std::getline(std::cin, launch_choice);
-  if (launch_choice != "chat") {
+  if (launch_choice != "chat" && launch_choice != "test") {
     std::cout << "Skipping chat sandbox.\n";
     return 0;
   }
 
   std::cout << "Initiating chat...\n";
   chat_manager c;
+  if (launch_choice == "test") {
+    c.loadTestProfilePreset();
+    std::cout << "Loaded temporary test profile preset.\n";
+  }
   const absl::Status chat_status = c.chat(std::cin, std::cout);
   if (!chat_status.ok()) {
     LOG(ERROR) << chat_status;

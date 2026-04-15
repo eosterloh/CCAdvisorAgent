@@ -4,6 +4,7 @@
 #include "../toolcalling/tools.hpp"
 #include "absl/status/status.h"
 #include "app/common/types.hpp"
+#include <optional>
 #include <ostream>
 #include <vector>
 
@@ -26,10 +27,20 @@ private:
   std::string
   deciderPrompt(); // will really just use the convo history to decide this.
   std::string getSummarization();
+  void addTraceEvent(const std::string &phase, const std::string &event_summary,
+                     bool success, int query_id,
+                     std::chrono::milliseconds latency,
+                     std::optional<std::string> tool_name);
+  std::vector<TraceEvent> trace_events;
 
 public:
   chat_manager();
+  void loadTestProfilePreset();
   absl::Status chat(std::istream &i, std::ostream &o); // chat loop
+  const std::vector<TraceEvent> &getTraceEvents() const {
+    return trace_events;
+  };
+  void clearTraceEvents();
 };
 
 #endif

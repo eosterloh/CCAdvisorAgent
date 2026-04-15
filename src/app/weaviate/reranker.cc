@@ -1,36 +1,35 @@
 #include "absl/status/status.h"
-#include <../../../include/app/geminiclient/gemini_generation.hpp>
-#include <../../../include/app/weaviate/reranker.hpp>
-#include <../../../include/app/weaviate/weaviate_port.hpp>
+#include "absl/strings/str_cat.h"
+#include "app/geminiclient/gemini_generation.hpp"
+#include "app/weaviate/reranker.hpp"
 
 #include <absl/status/statusor.h>
 #include <nlohmann/json.hpp>
 #include <sstream>
 
-absl::StatusOr<std::string> Reranker::rerank(std::string retrieved,
-                                             std::string query) {
+absl::StatusOr<std::string> Reranker::rerank(std::string_view retrieved,
+                                             std::string_view query) {
   GeminiGenerator g;
-  std::string prompt =
-      std::string(
-          "You are a reranker for academic advising retrieval.\n"
-          "Given a user query and retrieved candidate text, rank the candidate "
-          "chunks by relevance to the query.\n"
-          "Prioritize exact course codes, prerequisites, major/minor "
-          "requirements, and policy constraints.\n"
-          "Do not invent facts. Use only provided candidate text.\n\n"
-          "Return JSON only in this exact schema:\n"
-          "{\n"
-          "  \"ranked\": [\n"
-          "    {\"index\": 0, \"score\": 0.0, \"reason\": \"...\"}\n"
-          "  ],\n"
-          "  \"top_summary\": \"1-2 sentence grounded summary\"\n"
-          "}\n\n"
-          "Scoring guidance:\n"
-          "- score in [0.0, 1.0]\n"
-          "- higher is more relevant\n"
-          "- penalize generic/off-topic chunks\n\n"
-          "User query:\n") +
-      query + "\n\nRetrieved candidates:\n" + retrieved;
+  const std::string prompt = absl::StrCat(
+      "You are a reranker for academic advising retrieval.\n"
+      "Given a user query and retrieved candidate text, rank the candidate "
+      "chunks by relevance to the query.\n"
+      "Prioritize exact course codes, prerequisites, major/minor "
+      "requirements, and policy constraints.\n"
+      "Do not invent facts. Use only provided candidate text.\n\n"
+      "Return JSON only in this exact schema:\n"
+      "{\n"
+      "  \"ranked\": [\n"
+      "    {\"index\": 0, \"score\": 0.0, \"reason\": \"...\"}\n"
+      "  ],\n"
+      "  \"top_summary\": \"1-2 sentence grounded summary\"\n"
+      "}\n\n"
+      "Scoring guidance:\n"
+      "- score in [0.0, 1.0]\n"
+      "- higher is more relevant\n"
+      "- penalize generic/off-topic chunks\n\n"
+      "User query:\n",
+      query, "\n\nRetrieved candidates:\n", retrieved);
   absl::Status err = g.geminiGen(prompt);
   if (!err.ok()) {
     return err;

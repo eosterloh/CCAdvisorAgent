@@ -333,6 +333,65 @@ absl::Status makePlanAsPdf(GeminiGenerator &g, std::string convo_s,
 } // namespace
 
 chat_manager::chat_manager() {}
+void chat_manager::clearTraceEvents() { trace_events.clear(); }
+void chat_manager::addTraceEvent(const std::string &phase,
+                                 const std::string &event_summary, bool success,
+                                 int query_id,
+                                 std::chrono::milliseconds latency,
+                                 std::optional<std::string> tool_name) {
+  TraceEvent event;
+  event.phase = phase;
+  event.event_summary = event_summary;
+  event.tool_name = tool_name;
+  event.latency = latency;
+  event.query_id = query_id;
+  const std::chrono::system_clock::time_point now =
+      std::chrono::system_clock::now();
+  event.timestamp = static_cast<int>(
+      std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
+          .count());
+  event.success = success;
+  trace_events.push_back(event);
+}
+void chat_manager::loadTestProfilePreset() {
+  u_advisor = "JaneDoe";
+  u_major = "Computer Science";
+  u_minor = "none";
+
+  user_info = absl::StrCat(
+      "Student profile:\n",
+      "- Name: Erick O\n",
+      "- Class year: 2028\n",
+      "- Advisor: ", u_advisor, "\n",
+      "- Major: ", u_major, "\n",
+      "- Major description: Temporary test preset for Computer Science.\n",
+      "- Minor: ", u_minor, "\n",
+      "- Completed courses:\n",
+      "- Applied Python\n",
+      "- Computer Science 2\n",
+      "- Data Structures and Algorithms\n",
+      "- Computer Organization\n",
+      "- Software Design\n",
+      "- Current course:\n",
+      "- Theory of Computation\n",
+      "- Desired courses:\n",
+      "- Topics in Computer Science\n",
+      "- Interests: Applied AI\n",
+      "- Constraints: none\n",
+      "- Goal: get further along in major\n");
+
+  convo_longterm_history = user_info;
+  convo_shortterm_history = user_info;
+  curquery.clear();
+
+  if (availible_tools.empty()) {
+    availible_tools.push_back(
+        Tool("scraper", "Fetches up-to-date page content from a URL."));
+    availible_tools.push_back(
+        Tool("retrieve_from_weaviate",
+             "Retrieves relevant catalog/advising chunks from Weaviate."));
+  }
+}
 std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   if (!user_info.empty()) {
     o << "Loaded existing student profile.\n";
@@ -354,12 +413,6 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   u_advisor = ask("Assigned advisor name/email: ");
   u_major = ask("Declared/intended major: ");
   u_minor = ask("Declared/intended minor (or 'none'): ");
-  const std::string completed_courses =
-      ask("Courses completed so far (comma separated): ");
-  const std::string current_course = ask(
-      "Current course (Colorado College students take one course at a time): ");
-  const std::string target_courses =
-      ask("Courses you want to take next (comma separated): ");
   const std::string interests =
       ask("Academic interests (AI, systems, theory, etc.): ");
   const std::string constraints =
@@ -367,14 +420,111 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   const std::string goals =
       ask("Primary advising goal for this semester/year: ");
 
+  GeminiGenerator profile_llm;
+  auto describe_course = [&](const std::string &course_name) -> std::string {
+    absl::StatusOr<std::string> retrieved_or =
+        retrieveFromWeaviate(course_name);
+    std::string retrieved_context =
+        retrieved_or.ok() ? *retrieved_or : "No retrieval context available.";
+    const std::string prompt = absl::StrCat(
+        "You are producing a short academic profile note.\n"
+        "Given a course name and retrieval context, write a concise summary "
+        "with:\n"
+        "1) what the course is about (1 sentence)\n"
+        "2) likely prerequisites (short phrase or list)\n"
+        "If prerequisites are unclear, say \"prerequisites unclear\".\n"
+        "Assume the student has completed all prerequisites.\n"
+        "Return plain text only.\n\n"
+        "Course name: ",
+        course_name, "\n\nRetrieved context:\n", retrieved_context);
+    const absl::Status llm_status =
+        profile_llm.geminiGen(prompt, "lightweight");
+    if (!llm_status.ok()) {
+      return "Description unavailable; prerequisites unclear.";
+    }
+    const std::string extracted = extractJsonText(profile_llm.getContent());
+    if (extracted.empty()) {
+      return "Description unavailable; prerequisites unclear.";
+    }
+    return extracted;
+  };
+  auto describe_major = [&](const std::string &major_name) -> std::string {
+    if (major_name == "unspecified" || major_name == "none") {
+      return "No major provided.";
+    }
+    absl::StatusOr<std::string> retrieved_or = retrieveFromWeaviate(major_name);
+    std::string retrieved_context =
+        retrieved_or.ok() ? *retrieved_or : "No retrieval context available.";
+    const std::string prompt = absl::StrCat(
+        "You are producing a short major profile note.\n"
+        "Given a major name and retrieval context, write 2-3 concise sentences "
+        "covering:\n"
+        "1) what this major focuses on\n"
+        "2) typical core themes/courses a student should expect\n"
+        "Return plain text only.\n\n"
+        "Major name: ",
+        major_name, "\n\nRetrieved context:\n", retrieved_context);
+    const absl::Status llm_status =
+        profile_llm.geminiGen(prompt, "lightweight");
+    if (!llm_status.ok()) {
+      return "Major description unavailable.";
+    }
+    const std::string extracted = extractJsonText(profile_llm.getContent());
+    if (extracted.empty()) {
+      return "Major description unavailable.";
+    }
+    return extracted;
+  };
+
+  auto collect_courses = [&](const std::string &bucket_name,
+                             bool single_course_only) -> std::string {
+    std::string bucket_details;
+    int accepted_count = 0;
+    while (true) {
+      o << "Enter a " << bucket_name << " course name (or type 'done'): ";
+      std::string course_name;
+      std::getline(i, course_name);
+      if (course_name == "done") {
+        break;
+      }
+      if (course_name.empty()) {
+        o << "Please enter a course name or 'done'.\n";
+        continue;
+      }
+      if (single_course_only && accepted_count >= 1) {
+        o << "Colorado College students take one current course at a time. "
+             "Type 'done' to continue.\n";
+        continue;
+      }
+
+      const std::string description = describe_course(course_name);
+      bucket_details = absl::StrCat(bucket_details, "- ", course_name, ": ",
+                                    description, "\n");
+      ++accepted_count;
+    }
+
+    if (bucket_details.empty()) {
+      bucket_details = "- none provided\n";
+    }
+    return bucket_details;
+  };
+
+  const std::string completed_courses =
+      collect_courses("completed", /*single_course_only=*/false);
+  const std::string current_course =
+      collect_courses("current", /*single_course_only=*/true);
+  const std::string target_courses =
+      collect_courses("desired", /*single_course_only=*/false);
+  const std::string major_description = describe_major(u_major);
+
   user_info = absl::StrCat(
       "Student profile:\n", "- Name: ", student_name, "\n",
       "- Class year: ", class_year, "\n", "- Advisor: ", u_advisor, "\n",
-      "- Major: ", u_major, "\n", "- Minor: ", u_minor, "\n",
-      "- Completed courses: ", completed_courses, "\n",
-      "- Current course: ", current_course, "\n",
-      "- Desired courses: ", target_courses, "\n", "- Interests: ", interests,
-      "\n", "- Constraints: ", constraints, "\n", "- Goal: ", goals, "\n");
+      "- Major: ", u_major, "\n", "- Major description: ", major_description,
+      "\n", "- Minor: ", u_minor, "\n", "- Completed courses:\n",
+      completed_courses, "- Current course:\n", current_course,
+      "- Desired courses:\n", target_courses, "- Interests: ", interests, "\n",
+      "- Constraints: ", constraints, "\n", "- Goal: ", goals, "\n");
 
   // Seed both memories with the initial profile so planner/responder calls
   // always have baseline student context.
@@ -525,11 +675,26 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
   // latency or retry threshold.
   GeminiGenerator g;
   getUserInfo(i, o);
+  clearTraceEvents();
   absl::Status curstatus = absl::OkStatus();
   int query_number = 0;
   // Add logs for each of these steps
   while (curstatus.ok()) {
-    std::getline(i, curquery);
+    o << "\nYou: " << std::flush;
+    if (!std::getline(i, curquery)) {
+      o << "\nInput stream closed. Ending chat.\n";
+      addTraceEvent("input", "Input stream closed.", true, query_number,
+                    std::chrono::milliseconds(0),
+                    std::optional<std::string>());
+      break;
+    }
+    if (curquery.empty()) {
+      o << "Please enter a question for the advisor.\n";
+      addTraceEvent("input", "Skipped empty user query.", false, query_number,
+                    std::chrono::milliseconds(0),
+                    std::optional<std::string>());
+      continue;
+    }
     std::string curconversation = "";
     ++query_number;
     curconversation =
@@ -538,9 +703,20 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     //  decides where a tool call is neccessary or
     // just needs to respond or something.
     // we will use gemini 3.0 pro for this
+    o << "Thinking (planner)... " << std::flush;
+    std::chrono::steady_clock::time_point starttime =
+        std::chrono::steady_clock::now();
     std::string planner_prompt = plannerPrompt();
     curstatus = g.geminiGen(absl::StrCat(planner_prompt, "\n", curquery));
+    std::chrono::steady_clock::time_point endtime =
+        std::chrono::steady_clock::now();
+    const std::chrono::milliseconds thinkingtime =
+        std::chrono::duration_cast<std::chrono::milliseconds>(endtime -
+                                                               starttime);
     if (!curstatus.ok()) {
+      addTraceEvent("planner", absl::StrCat("Planner failed: ", curstatus),
+                    false, query_number, thinkingtime,
+                    std::optional<std::string>());
       return curstatus;
     }
     std::string plan = parsePlan(g.getContent());
@@ -551,7 +727,10 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     std::vector<std::string> explaination_for_use;
     updateToolsFromPlannerPlan(plan, availible_tools, &tools_to_use,
                                &explaination_for_use);
-
+    const long long thinkingtime_ms = thinkingtime.count();
+    addTraceEvent("planner", "Planner generated plan.", true, query_number,
+                  thinkingtime, std::optional<std::string>());
+    o << "done (" << thinkingtime_ms << " ms)\n" << std::flush;
     // sends plan to orchestrator which handles the tool calls
     // while loop for orchestrator//observer
     // this only happens if the planner deemed the tool call
@@ -567,6 +746,10 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           std::string planner_prompt = plannerPrompt();
           curstatus = g.geminiGen(absl::StrCat(planner_prompt, "\n", curquery));
           if (!curstatus.ok()) {
+            addTraceEvent("planner_retry",
+                          absl::StrCat("Planner retry failed: ", curstatus),
+                          false, query_number, std::chrono::milliseconds(0),
+                          std::optional<std::string>());
             return curstatus;
           }
           plan = parsePlan(g.getContent());
@@ -574,18 +757,33 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                                      &explaination_for_use);
           curconversation =
               absl::StrCat(curconversation, "Planned to do ", plan, "\n");
+          addTraceEvent("planner_retry", "Planner retry regenerated plan.", true,
+                        query_number, std::chrono::milliseconds(0),
+                        std::optional<std::string>());
         }
         std::string orchestrator_prompt =
             orchPrompt(tools_to_use, explaination_for_use);
-        const auto orchestrator_started = std::chrono::steady_clock::now();
+        o << "Orchestrating tool calls... " << std::flush;
+        const std::chrono::steady_clock::time_point orchestrator_started =
+            std::chrono::steady_clock::now();
         absl::Status err = g.geminiGen(orchestrator_prompt);
-        const auto orchestrator_ended = std::chrono::steady_clock::now();
-        const auto orchestrator_latency =
+        const std::chrono::steady_clock::time_point orchestrator_ended =
+            std::chrono::steady_clock::now();
+        const std::chrono::milliseconds orchestrator_latency =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 orchestrator_ended - orchestrator_started);
         if (!err.ok()) {
+          addTraceEvent("orchestrator",
+                        absl::StrCat("Orchestrator failed: ", err), false,
+                        query_number, orchestrator_latency,
+                        std::optional<std::string>());
           return err;
         }
+        addTraceEvent("orchestrator", "Orchestrator produced tool calls.", true,
+                      query_number, orchestrator_latency,
+                      std::optional<std::string>());
+        o << "done (" << orchestrator_latency.count() << " ms)\n"
+          << std::flush;
         if (orchestrator_latency > kMaxLatencyDelay) {
           latencyExceededThisCycle = true;
           curconversation =
@@ -599,17 +797,28 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           if (curToolCalls >= kMaxToolcalls) {
             break;
           }
+          o << "Running tool: " << tool.getToolName() << "...\n" << std::flush;
 
           ToolCallingLogs log_entry;
           log_entry.toolname = tool.getToolName();
           log_entry.success = false;
           log_entry.summary = "Tool not executed.";
           log_entry.latency_ms = 0;
-          const auto started = std::chrono::steady_clock::now();
+          const std::chrono::steady_clock::time_point started =
+              std::chrono::steady_clock::now();
 
           if (!tool.hasInvocation()) {
             log_entry.summary = "Skipped: missing invocation payload.";
+            const std::chrono::steady_clock::time_point ended =
+                std::chrono::steady_clock::now();
+            log_entry.latency_ms = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(ended -
+                                                                      started)
+                    .count());
             logs.push_back(log_entry);
+            addTraceEvent("tool", log_entry.summary, false, query_number,
+                          std::chrono::milliseconds(log_entry.latency_ms),
+                          std::optional<std::string>(tool.getToolName()));
             ++curToolCalls;
             continue;
           }
@@ -654,7 +863,8 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                                              tool.getToolName(), "'.");
           }
 
-          const auto ended = std::chrono::steady_clock::now();
+          const std::chrono::steady_clock::time_point ended =
+              std::chrono::steady_clock::now();
           log_entry.latency_ms = static_cast<int>(
               std::chrono::duration_cast<std::chrono::milliseconds>(ended -
                                                                     started)
@@ -667,6 +877,10 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                 "ms (limit ", kMaxLatencyDelay.count(), "ms)");
           }
           logs.push_back(log_entry);
+          addTraceEvent("tool", log_entry.summary, log_entry.success,
+                        query_number,
+                        std::chrono::milliseconds(log_entry.latency_ms),
+                        std::optional<std::string>(tool.getToolName()));
           curconversation =
               absl::StrCat(curconversation, "called tool: ", tool.getToolName(),
                            " -> ", log_entry.summary, "\n");
@@ -675,15 +889,25 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
         // After this happens, give the logs to an observer judge
 
         std::string observer_prompt = observerPrompt(logs);
-        const auto observer_started = std::chrono::steady_clock::now();
+        o << "Evaluating results (observer)... " << std::flush;
+        const std::chrono::steady_clock::time_point observer_started =
+            std::chrono::steady_clock::now();
         err = g.geminiGen(observer_prompt);
-        const auto observer_ended = std::chrono::steady_clock::now();
-        const auto observer_latency =
+        const std::chrono::steady_clock::time_point observer_ended =
+            std::chrono::steady_clock::now();
+        const std::chrono::milliseconds observer_latency =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 observer_ended - observer_started);
         if (!err.ok()) {
+          addTraceEvent("observer", absl::StrCat("Observer failed: ", err),
+                        false, query_number, observer_latency,
+                        std::optional<std::string>());
           return err;
         }
+        addTraceEvent("observer", "Observer evaluated tool outcomes.", true,
+                      query_number, observer_latency,
+                      std::optional<std::string>());
+        o << "done (" << observer_latency.count() << " ms)\n" << std::flush;
         if (observer_latency > kMaxLatencyDelay) {
           latencyExceededThisCycle = true;
           curconversation =
@@ -707,10 +931,22 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
       // called tool: blah
       // end of current query
       curconversation = absl::StrCat(curconversation, "end of current query\n");
+      o << "Updating memory... " << std::flush;
+      const std::chrono::steady_clock::time_point memory_started =
+          std::chrono::steady_clock::now();
       convo_longterm_history =
           summarizeLong(convo_longterm_history, curconversation, user_info, g);
       convo_shortterm_history = summarizeShort(convo_shortterm_history,
                                                curconversation, user_info, g);
+      const std::chrono::steady_clock::time_point memory_ended =
+          std::chrono::steady_clock::now();
+      const std::chrono::milliseconds memory_latency =
+          std::chrono::duration_cast<std::chrono::milliseconds>(memory_ended -
+                                                                 memory_started);
+      addTraceEvent("memory", "Updated long and short summaries.", true,
+                    query_number, memory_latency,
+                    std::optional<std::string>());
+      o << "done (" << memory_latency.count() << " ms)\n" << std::flush;
 
       // another agent call: heres what I did.
       o << getSummarization() << "\n";
@@ -718,15 +954,52 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
       // Responder agent.
       //  if we do nothing we should respond
       std::string responder_prompt = responderPrompt(curquery);
+      o << "Drafting response... " << std::flush;
+      const std::chrono::steady_clock::time_point responder_started =
+          std::chrono::steady_clock::now();
       curstatus = g.geminiGen(responder_prompt);
+      const std::chrono::steady_clock::time_point responder_ended =
+          std::chrono::steady_clock::now();
+      const std::chrono::milliseconds responder_latency =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              responder_ended - responder_started);
+      if (!curstatus.ok()) {
+        addTraceEvent("responder",
+                      absl::StrCat("Responder failed: ", curstatus), false,
+                      query_number, responder_latency,
+                      std::optional<std::string>());
+        return curstatus;
+      }
+      addTraceEvent("responder", "Responder drafted direct answer.", true,
+                    query_number, responder_latency,
+                    std::optional<std::string>());
+      o << "done (" << responder_latency.count() << " ms)\n" << std::flush;
+      const std::string responder_text = extractJsonText(g.getContent());
+      if (!responder_text.empty()) {
+        o << "Advisor: " << responder_text << "\n";
+      } else {
+        o << "Advisor: " << g.getContent() << "\n";
+      }
       curconversation = absl::StrCat(
           curconversation, "Planned to do respond directly without tools.\n",
           "end of current query\n");
 
+      o << "Updating memory... " << std::flush;
+      const std::chrono::steady_clock::time_point memory_started =
+          std::chrono::steady_clock::now();
       convo_longterm_history =
           summarizeLong(convo_longterm_history, curconversation, user_info, g);
       convo_shortterm_history = summarizeShort(convo_shortterm_history,
                                                curconversation, user_info, g);
+      const std::chrono::steady_clock::time_point memory_ended =
+          std::chrono::steady_clock::now();
+      const std::chrono::milliseconds memory_latency =
+          std::chrono::duration_cast<std::chrono::milliseconds>(memory_ended -
+                                                                 memory_started);
+      addTraceEvent("memory", "Updated long and short summaries.", true,
+                    query_number, memory_latency,
+                    std::optional<std::string>());
+      o << "done (" << memory_latency.count() << " ms)\n" << std::flush;
       // Summarizer summarizes this conversation twice: in the conte
       // xt of the whole thing and in the short term conversation
     }
@@ -734,13 +1007,39 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     //  cna be made and there is no ambiguity in a list of things.
 
     std::string decider_prompt = deciderPrompt();
+    const std::chrono::steady_clock::time_point decider_started =
+        std::chrono::steady_clock::now();
     curstatus = g.geminiGen(decider_prompt);
+    const std::chrono::steady_clock::time_point decider_ended =
+        std::chrono::steady_clock::now();
+    const std::chrono::milliseconds decider_latency =
+        std::chrono::duration_cast<std::chrono::milliseconds>(decider_ended -
+                                                               decider_started);
+    if (!curstatus.ok()) {
+      addTraceEvent("decider", absl::StrCat("Decider failed: ", curstatus),
+                    false, query_number, decider_latency,
+                    std::optional<std::string>());
+      return curstatus;
+    }
     std::string decider_result = g.getContent();
     bool done = parseDeciderDecision(decider_result);
+    addTraceEvent("decider",
+                  done ? "Decider marked workflow complete."
+                       : "Decider requested another round.",
+                  true, query_number, decider_latency,
+                  std::optional<std::string>());
 
     if (done) {
       curstatus =
           makePlanAsPdf(g, convo_shortterm_history, convo_longterm_history);
+      addTraceEvent("plan_generation",
+                    curstatus.ok() ? "Generated final plan markdown."
+                                   : "Failed to generate final plan markdown.",
+                    curstatus.ok(), query_number, std::chrono::milliseconds(0),
+                    std::optional<std::string>());
+      if (!curstatus.ok()) {
+        return curstatus;
+      }
       break;
     }
   }

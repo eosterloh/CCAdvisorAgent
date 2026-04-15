@@ -51,7 +51,7 @@ std::string ExtractCourseTitleFromContent(const std::string &content_text) {
 }
 } // namespace
 
-absl::Status GeminiEmbedding::embed(std::string chunk) {
+absl::Status GeminiEmbedding::embed(std::string_view chunk) {
   if (apikey.empty()) {
     return absl::InternalError("GEMINI_API_KEY is not set.");
   }
@@ -108,7 +108,7 @@ absl::Status GeminiEmbedding::embed(std::string chunk) {
   return absl::OkStatus();
 }
 
-absl::Status GeminiEmbedding::embedFile(std::string filepath) {
+absl::Status GeminiEmbedding::embedFile(std::string_view filepath) {
   std::ifstream f(filepath);
   if (!f.is_open()) {
     return absl::InternalError("Error opening file");

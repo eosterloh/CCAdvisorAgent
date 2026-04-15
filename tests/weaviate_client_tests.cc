@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <vector>
 
@@ -48,18 +49,30 @@ std::size_t DetectCourseChunkVectorDimension() {
   return detected_dim == 0 ? 3072 : detected_dim;
 }
 
+std::string RandomSuffix() {
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  std::uniform_int_distribution<unsigned long long> dist;
+  std::ostringstream out;
+  out << std::hex << dist(gen);
+  return out.str();
+}
+
 } // namespace
 
 absl::Status RunWeaviateClientTests() {
   std::cout << "[Weaviate] Running embed + nearVector retrieve test...\n";
 
   weaviateClient client;
+  const std::string run_id = RandomSuffix();
   EmbeddedRecord record;
-  record.source_path = "tests://weaviate_client_tests";
-  record.source_url = "https://example.test/course/CP999";
+  record.source_path = absl::StrCat("tests://weaviate_client_tests/", run_id);
+  record.source_url = absl::StrCat("https://example.test/course/CP999/", run_id);
   record.course_code = std::optional<std::string>("CP999");
   record.course_title = "Synthetic Test Course";
-  record.chunk_text = "This synthetic chunk is for testing near vector retrieval.";
+  record.chunk_text = absl::StrCat(
+      "This synthetic chunk is for testing near vector retrieval. run_id=",
+      run_id);
   const std::size_t embedding_dim = DetectCourseChunkVectorDimension();
   record.embedding = std::vector<float>(embedding_dim, 0.0F);
   if (embedding_dim > 0) {
