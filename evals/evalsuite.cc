@@ -88,6 +88,13 @@ Tier 3 (stretch):
 - 1 stress case (long query + latency assertions)
 */
 
+#include "../include/app/common/types.hpp"
+
+std::vector<Test> getTests() {
+  // get stuff form the jsonl
+  // Figure out specifics later.
+}
+
 int evalsuite() {
   // First: lets do some RAG tests
   // Make sure coverage of tests is really good
@@ -95,9 +102,18 @@ int evalsuite() {
   // parameters.
   // Run this whenever a vector is retrieved in the
   // Agent as well.
-  checkWeaviateResults(query, results);
+  //
+  checkWeaviateResults();
   // Next Evals for all the agents
   // Before this: read an article on Agent
   // Evals
   // Should run thru
+  std::vector<Tests> = getTests();
+  for
+
+  - Load cases.
+  - Run each case through chat_manager (prefer "test" preset mode).
+  - Collect traces via getTraceEvents().
+  - Score with deterministic checks.
+  - Write eval_results.jsonl and print summary to stdout.
 }

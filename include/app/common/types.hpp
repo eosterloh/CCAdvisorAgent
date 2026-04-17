@@ -32,4 +32,6 @@ struct TraceEvent {
   bool success;
 };
 
+struct Test {};
+
 #endif
