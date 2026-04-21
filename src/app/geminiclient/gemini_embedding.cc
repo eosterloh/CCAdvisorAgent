@@ -109,7 +109,7 @@ absl::Status GeminiEmbedding::embed(std::string_view chunk) {
 }
 
 absl::Status GeminiEmbedding::embedFile(std::string_view filepath) {
-  std::ifstream f(filepath);
+  std::ifstream f{std::string(filepath)};
   if (!f.is_open()) {
     return absl::InternalError("Error opening file");
   }

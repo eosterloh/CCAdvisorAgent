@@ -121,6 +121,28 @@ std::pair<bool, bool> parseObserverDecision(std::string returned) {
 
 std::string parsePlan(std::string msg) { return extractJsonText(msg); }
 
+struct GroundedResponderOutput {
+  std::string final_answer;
+  std::string evidence_blob;
+  bool parsed;
+};
+
+GroundedResponderOutput parseGroundedResponderOutput(const std::string &text) {
+  const json parsed = json::parse(text, nullptr, false);
+  if (parsed.is_discarded() || !parsed.is_object() ||
+      !parsed.contains("final_answer") ||
+      !parsed.at("final_answer").is_string()) {
+    return {"", "", false};
+  }
+
+  std::string evidence_blob;
+  if (parsed.contains("grounded_claims") &&
+      parsed.at("grounded_claims").is_array()) {
+    evidence_blob = parsed.at("grounded_claims").dump();
+  }
+  return {parsed.at("final_answer").get<std::string>(), evidence_blob, true};
+}
+
 double parseToolCallingThreshold(const std::string &plan_text) {
   if (plan_text.empty()) {
     return 0.0;
@@ -338,11 +360,13 @@ void chat_manager::addTraceEvent(const std::string &phase,
                                  const std::string &event_summary, bool success,
                                  int query_id,
                                  std::chrono::milliseconds latency,
-                                 std::optional<std::string> tool_name) {
+                                 std::optional<std::string> tool_name,
+                                 std::optional<std::string> evidence) {
   TraceEvent event;
   event.phase = phase;
   event.event_summary = event_summary;
   event.tool_name = tool_name;
+  event.evidence = evidence;
   event.latency = latency;
   event.query_id = query_id;
   const std::chrono::system_clock::time_point now =
@@ -618,13 +642,27 @@ std::string chat_manager::observerPrompt(std::vector<ToolCallingLogs> logs) {
 
 std::string chat_manager::responderPrompt(std::string curquery) {
   return absl::StrCat(
-      "You are a concise academic advising assistant.\n"
+      "You are a concise academic advising assistant that must stay grounded.\n"
       "Respond directly without tool calls when confidence is high.\n"
       "If uncertain, ask one clarifying question.\n\n"
+      "Return JSON only in this exact schema:\n"
+      "{\n"
+      "  \"final_answer\": \"...\",\n"
+      "  \"grounded_claims\": [\n"
+      "    {\n"
+      "      \"claim\": \"...\",\n"
+      "      \"evidence\": [\"source_url or source_path snippet\", \"...\"]\n"
+      "    }\n"
+      "  ],\n"
+      "  \"uncertainties\": [\"...\"]\n"
+      "}\n"
+      "Rules:\n"
+      "- Use only grounded evidence from provided context and memory.\n"
+      "- If evidence is missing, state uncertainty instead of guessing.\n\n"
       "User profile:\n",
       user_info, "\n\nShort-term memory:\n", convo_shortterm_history,
       "\n\nLong-term memory:\n", convo_longterm_history,
-      "\n\nCurrent user query:\n", curquery, "\n\nReturn plain text only.");
+      "\n\nCurrent user query:\n", curquery);
 }
 
 std::string chat_manager::deciderPrompt() {
@@ -800,6 +838,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           o << "Running tool: " << tool.getToolName() << "...\n" << std::flush;
 
           ToolCallingLogs log_entry;
+          std::optional<std::string> tool_evidence;
           log_entry.toolname = tool.getToolName();
           log_entry.success = false;
           log_entry.summary = "Tool not executed.";
@@ -853,6 +892,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                 log_entry.summary = absl::StrCat(
                     "Weaviate retrieval + rerank succeeded. Output size=",
                     retrieval_or->size(), " chars.");
+                tool_evidence = *retrieval_or;
               } else {
                 log_entry.summary = absl::StrCat("Weaviate retrieval failed: ",
                                                  retrieval_or.status());
@@ -880,7 +920,8 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           addTraceEvent("tool", log_entry.summary, log_entry.success,
                         query_number,
                         std::chrono::milliseconds(log_entry.latency_ms),
-                        std::optional<std::string>(tool.getToolName()));
+                        std::optional<std::string>(tool.getToolName()),
+                        tool_evidence);
           curconversation =
               absl::StrCat(curconversation, "called tool: ", tool.getToolName(),
                            " -> ", log_entry.summary, "\n");
@@ -970,15 +1011,33 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                       std::optional<std::string>());
         return curstatus;
       }
-      addTraceEvent("responder", "Responder drafted direct answer.", true,
-                    query_number, responder_latency,
-                    std::optional<std::string>());
       o << "done (" << responder_latency.count() << " ms)\n" << std::flush;
       const std::string responder_text = extractJsonText(g.getContent());
-      if (!responder_text.empty()) {
+      const GroundedResponderOutput grounded =
+          parseGroundedResponderOutput(responder_text);
+      if (grounded.parsed) {
+        o << "Advisor: " << grounded.final_answer << "\n";
+        addTraceEvent("responder", "Responder drafted grounded answer.", true,
+                      query_number, responder_latency,
+                      std::optional<std::string>(),
+                      grounded.evidence_blob.empty()
+                          ? std::optional<std::string>()
+                          : std::optional<std::string>(grounded.evidence_blob));
+      } else if (!responder_text.empty()) {
         o << "Advisor: " << responder_text << "\n";
+        addTraceEvent("responder",
+                      "Responder output was not grounded JSON schema.", false,
+                      query_number, responder_latency,
+                      std::optional<std::string>(),
+                      std::optional<std::string>(responder_text));
       } else {
-        o << "Advisor: " << g.getContent() << "\n";
+        const std::string raw = g.getContent();
+        o << "Advisor: " << raw << "\n";
+        addTraceEvent("responder",
+                      "Responder output parse failed; raw content returned.",
+                      false, query_number, responder_latency,
+                      std::optional<std::string>(),
+                      std::optional<std::string>(raw));
       }
       curconversation = absl::StrCat(
           curconversation, "Planned to do respond directly without tools.\n",

@@ -26,6 +26,7 @@ struct TraceEvent {
   std::string phase;
   std::string event_summary;
   std::optional<std::string> tool_name;
+  std::optional<std::string> evidence;
   std::chrono::milliseconds latency;
   int query_id;
   int timestamp;

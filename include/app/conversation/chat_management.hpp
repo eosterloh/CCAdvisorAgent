@@ -30,7 +30,9 @@ private:
   void addTraceEvent(const std::string &phase, const std::string &event_summary,
                      bool success, int query_id,
                      std::chrono::milliseconds latency,
-                     std::optional<std::string> tool_name);
+                     std::optional<std::string> tool_name,
+                     std::optional<std::string> evidence =
+                         std::optional<std::string>());
   std::vector<TraceEvent> trace_events;
 
 public:
