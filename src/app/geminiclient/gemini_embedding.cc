@@ -100,6 +100,8 @@ absl::Status GeminiEmbedding::embed(std::string_view chunk) {
   EmbeddedRecord record;
   record.source_path = "";
   record.source_url = "";
+  record.major_key = "";
+  record.major_name = "";
   record.course_code = std::nullopt;
   record.course_title = "";
   record.chunk_text = chunk;
@@ -197,6 +199,8 @@ absl::Status GeminiEmbedding::embedFile(std::string_view filepath) {
     EmbeddedRecord record;
     record.source_path = filepath;
     record.source_url = source_text;
+    record.major_key = "";
+    record.major_name = "";
     if (is_course_file) {
       std::optional<std::string> code =
           ExtractCourseCodeFromContent(content_text);

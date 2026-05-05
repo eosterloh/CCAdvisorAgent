@@ -12,7 +12,8 @@ private:
 
 public:
   absl::Status embed(const EmbeddedRecord &e);
-  absl::StatusOr<EmbeddedRecord> retreive(std::string_view query);
+  absl::StatusOr<EmbeddedRecord> retreive(std::string_view query,
+                                          std::string_view major_key = "");
 };
 
 #endif

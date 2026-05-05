@@ -10,6 +10,8 @@ struct EmbeddedRecord {
   std::vector<float> embedding;
   std::string source_path; // filepath url
   std::string source_url;
+  std::string major_key;
+  std::string major_name;
   std::optional<std::string> course_code;
   std::string course_title;
   std::string chunk_text;

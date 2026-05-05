@@ -11,6 +11,20 @@
 
 using json = nlohmann::json;
 
+namespace {
+std::string EscapeGraphqlString(std::string_view input) {
+  std::string escaped;
+  escaped.reserve(input.size());
+  for (char c : input) {
+    if (c == '\\' || c == '"') {
+      escaped.push_back('\\');
+    }
+    escaped.push_back(c);
+  }
+  return escaped;
+}
+} // namespace
+
 std::string weaviateClient::HashRecordKey(const EmbeddedRecord &record) const {
   const std::string key =
       absl::StrCat(record.source_url, "|", record.chunk_text);
@@ -40,7 +54,9 @@ absl::Status weaviateClient::embed(const EmbeddedRecord &e) {
   json payload = {{"id", object_id},
                   {"class", "CourseChunk"},
                   {"properties",
-                   {{"course_code", e.course_code},
+                   {{"major_key", e.major_key},
+                    {"major_name", e.major_name},
+                    {"course_code", e.course_code},
                     {"title", e.course_title},
                     {"source_url", e.source_url},
                     {"source_path", e.source_path},
@@ -66,8 +82,8 @@ absl::Status weaviateClient::embed(const EmbeddedRecord &e) {
   }
 }
 
-absl::StatusOr<EmbeddedRecord>
-weaviateClient::retreive(std::string_view query) {
+absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string_view query,
+                                                        std::string_view major_key) {
   GeminiEmbedding embedder;
   const absl::Status embed_status = embedder.embed(query);
   if (!embed_status.ok()) {
@@ -91,10 +107,17 @@ weaviateClient::retreive(std::string_view query) {
     vector_stream << query_record_or->embedding.at(i);
   }
 
+  std::string where_clause;
+  if (!major_key.empty()) {
+    where_clause = absl::StrCat(
+        ", where: {path: [\"major_key\"], operator: Equal, valueText: \"",
+        EscapeGraphqlString(major_key), "\"}");
+  }
   const std::string graphql_query = absl::StrCat(
       "{ Get { CourseChunk(nearVector: {vector: [", vector_stream.str(),
-      "]}, limit: 10) { course_code title source_url source_path chunk_text "
-      "_additional { id distance } } } }");
+      "]}", where_clause,
+      ", limit: 10) { major_key major_name course_code title source_url "
+      "source_path chunk_text _additional { id distance } } } }");
 
   cpr::Url endpoint{"http://localhost:8080/v1/graphql"};
 
@@ -134,6 +157,14 @@ weaviateClient::retreive(std::string_view query) {
   record.source_url =
       obj.contains("source_url") && obj["source_url"].is_string()
           ? obj["source_url"].get<std::string>()
+          : "";
+  record.major_key =
+      obj.contains("major_key") && obj["major_key"].is_string()
+          ? obj["major_key"].get<std::string>()
+          : "";
+  record.major_name =
+      obj.contains("major_name") && obj["major_name"].is_string()
+          ? obj["major_name"].get<std::string>()
           : "";
 
   if (obj.contains("course_code") && obj["course_code"].is_string()) {

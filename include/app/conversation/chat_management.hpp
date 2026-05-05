@@ -16,8 +16,11 @@ private:
   std::string user_info;
   std::string u_advisor; // if writing an email is neccessary
   std::string u_major;
+  std::string u_major_key;
   std::string u_minor;
+  std::string major_ingest_status_file;
   std::string curquery;
+  void launchMajorIngestionInBackground(std::ostream &o);
   std::string getUserInfo(std::istream &i, std::ostream &o);
   std::string plannerPrompt();
   std::string orchPrompt(std::vector<Tool> tools,

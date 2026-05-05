@@ -136,11 +136,33 @@ target_link_libraries(send_data_to_weaviate PRIVATE
 )
 
 add_executable(
-  concurrency_practice
-  concurency.cc
+  major_ingest_runner
+  scripts/major_ingest_runner.cc
+  src/app/toolcalling/scraper_tool.cc
+  src/app/weaviate/weaviate_port.cc
+  src/app/geminiclient/gemini_embedding.cc
+  src/app/geminiclient/gemini_requests.cc
 )
 
-target_link_libraries(concurrency_practice PRIVATE
-  absl::synchronization
-  absl::time
+target_include_directories(major_ingest_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+target_link_libraries(major_ingest_runner PRIVATE
+  absl::log
+  absl::strings
+  absl::status
+  absl::statusor
+  cpr::cpr
+  nlohmann_json::nlohmann_json
 )
+
+if (EXISTS "${CMAKE_SOURCE_DIR}/concurency.cc")
+  add_executable(
+    concurrency_practice
+    concurency.cc
+  )
+
+  target_link_libraries(concurrency_practice PRIVATE
+    absl::synchronization
+    absl::time
+  )
+endif()

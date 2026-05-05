@@ -6,18 +6,84 @@
 #include "app/toolcalling/retrieve_from_weaviate.hpp"
 #include "app/toolcalling/scraper_tool.hpp"
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <string_view>
 #include <utility>
 #include <vector>
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 namespace {
 constexpr int kMaxToolcalls = 10;
 constexpr std::chrono::milliseconds kMaxLatencyDelay =
     std::chrono::milliseconds(5000);
 constexpr double kToolCallThreshold = .6;
+
+std::string normalizeMajorKey(std::string major) {
+  for (char &c : major) {
+    const bool is_alnum =
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    if (is_alnum) {
+      if (c >= 'A' && c <= 'Z') {
+        c = static_cast<char>(c - 'A' + 'a');
+      }
+      continue;
+    }
+    c = '_';
+  }
+  std::string compact;
+  compact.reserve(major.size());
+  bool previous_underscore = false;
+  for (char c : major) {
+    if (c == '_') {
+      if (!previous_underscore) {
+        compact.push_back(c);
+      }
+      previous_underscore = true;
+    } else {
+      compact.push_back(c);
+      previous_underscore = false;
+    }
+  }
+  while (!compact.empty() && compact.front() == '_') {
+    compact.erase(compact.begin());
+  }
+  while (!compact.empty() && compact.back() == '_') {
+    compact.pop_back();
+  }
+  if (compact.empty()) {
+    return "unspecified_major";
+  }
+  return compact;
+}
+
+std::string shellEscapeSingleQuoted(const std::string &raw) {
+  std::string escaped;
+  escaped.reserve(raw.size() + 8);
+  for (char c : raw) {
+    if (c == '\'') {
+      escaped.append("'\\''");
+      continue;
+    }
+    escaped.push_back(c);
+  }
+  return escaped;
+}
+
+fs::path resolveProjectRoot() {
+  const fs::path cwd = fs::current_path();
+  if (fs::exists(cwd / "scripts" / "populate_major_in_background.sh")) {
+    return cwd;
+  }
+  if (fs::exists(cwd / ".." / "scripts" / "populate_major_in_background.sh")) {
+    return fs::weakly_canonical(cwd / "..");
+  }
+  return cwd;
+}
 std::string extractJsonText(std::string preparsed) {
   const json root = json::parse(preparsed, nullptr, false);
   if (root.is_discarded()) {
@@ -127,8 +193,54 @@ struct GroundedResponderOutput {
   bool parsed;
 };
 
+std::string normalizeJsonPayload(std::string text) {
+  const std::string fenced_prefix = "```json";
+  const std::string fence = "```";
+
+  auto trim = [](std::string *value) {
+    while (!value->empty() &&
+           (value->front() == ' ' || value->front() == '\n' ||
+            value->front() == '\t' || value->front() == '\r')) {
+      value->erase(value->begin());
+    }
+    while (!value->empty() &&
+           (value->back() == ' ' || value->back() == '\n' ||
+            value->back() == '\t' || value->back() == '\r')) {
+      value->pop_back();
+    }
+  };
+
+  trim(&text);
+  if (text.rfind(fenced_prefix, 0) == 0) {
+    text.erase(0, fenced_prefix.size());
+    trim(&text);
+    if (text.size() >= fence.size() &&
+        text.compare(text.size() - fence.size(), fence.size(), fence) == 0) {
+      text.erase(text.size() - fence.size());
+    }
+    trim(&text);
+  } else if (text.rfind(fence, 0) == 0) {
+    text.erase(0, fence.size());
+    trim(&text);
+    if (text.size() >= fence.size() &&
+        text.compare(text.size() - fence.size(), fence.size(), fence) == 0) {
+      text.erase(text.size() - fence.size());
+    }
+    trim(&text);
+  }
+
+  const std::size_t first_brace = text.find('{');
+  const std::size_t last_brace = text.rfind('}');
+  if (first_brace != std::string::npos && last_brace != std::string::npos &&
+      last_brace >= first_brace) {
+    return text.substr(first_brace, last_brace - first_brace + 1);
+  }
+  return text;
+}
+
 GroundedResponderOutput parseGroundedResponderOutput(const std::string &text) {
-  const json parsed = json::parse(text, nullptr, false);
+  const std::string normalized = normalizeJsonPayload(text);
+  const json parsed = json::parse(normalized, nullptr, false);
   if (parsed.is_discarded() || !parsed.is_object() ||
       !parsed.contains("final_answer") ||
       !parsed.at("final_answer").is_string()) {
@@ -356,6 +468,36 @@ absl::Status makePlanAsPdf(GeminiGenerator &g, std::string convo_s,
 
 chat_manager::chat_manager() {}
 void chat_manager::clearTraceEvents() { trace_events.clear(); }
+void chat_manager::launchMajorIngestionInBackground(std::ostream &o) {
+  if (u_major_key.empty() || u_major_key == "none" || u_major_key == "unspecified") {
+    return;
+  }
+  const fs::path project_root = resolveProjectRoot();
+  major_ingest_status_file =
+      (project_root / "data" / "major_ingest" /
+       absl::StrCat(u_major_key, ".status.json"))
+          .string();
+  const fs::path script_path =
+      project_root / "scripts" / "populate_major_in_background.sh";
+  if (!fs::exists(script_path)) {
+    o << "Warning: major ingestion script not found. Continuing without "
+         "background population.\n";
+    return;
+  }
+
+  const std::string command =
+      absl::StrCat("bash '", shellEscapeSingleQuoted(script_path.string()),
+                   "' '", shellEscapeSingleQuoted(u_major), "' >/dev/null 2>&1 &");
+  const int launch_code = std::system(command.c_str());
+  if (launch_code == 0) {
+    o << "Started background major ingestion for '" << u_major
+      << "'. Advising can continue while data is still populating.\n";
+  } else {
+    o << "Warning: failed to start background major ingestion. Continuing "
+         "without it.\n";
+  }
+}
+
 void chat_manager::addTraceEvent(const std::string &phase,
                                  const std::string &event_summary, bool success,
                                  int query_id,
@@ -379,8 +521,10 @@ void chat_manager::addTraceEvent(const std::string &phase,
 }
 void chat_manager::loadTestProfilePreset() {
   u_advisor = "JaneDoe";
-  u_major = "Computer Science";
+  u_major = "Undeclared";
+  u_major_key = normalizeMajorKey(u_major);
   u_minor = "none";
+  major_ingest_status_file.clear();
 
   user_info = absl::StrCat(
       "Student profile:\n",
@@ -388,19 +532,18 @@ void chat_manager::loadTestProfilePreset() {
       "- Class year: 2028\n",
       "- Advisor: ", u_advisor, "\n",
       "- Major: ", u_major, "\n",
-      "- Major description: Temporary test preset for Computer Science.\n",
+      "- Major description: Temporary test preset profile for chat iteration.\n",
       "- Minor: ", u_minor, "\n",
       "- Completed courses:\n",
       "- Applied Python\n",
-      "- Computer Science 2\n",
-      "- Data Structures and Algorithms\n",
-      "- Computer Organization\n",
-      "- Software Design\n",
+      "- Introduction to College Writing\n",
+      "- Introduction to Economics\n",
+      "- Calculus I\n",
       "- Current course:\n",
-      "- Theory of Computation\n",
+      "- Introductory Psychology\n",
       "- Desired courses:\n",
-      "- Topics in Computer Science\n",
-      "- Interests: Applied AI\n",
+      "- Public Policy Analysis\n",
+      "- Interests: interdisciplinary planning\n",
       "- Constraints: none\n",
       "- Goal: get further along in major\n");
 
@@ -436,6 +579,8 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   const std::string class_year = ask("Class year (e.g. 2027): ");
   u_advisor = ask("Assigned advisor name/email: ");
   u_major = ask("Declared/intended major: ");
+  u_major_key = normalizeMajorKey(u_major);
+  launchMajorIngestionInBackground(o);
   u_minor = ask("Declared/intended minor (or 'none'): ");
   const std::string interests =
       ask("Academic interests (AI, systems, theory, etc.): ");
@@ -447,7 +592,7 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   GeminiGenerator profile_llm;
   auto describe_course = [&](const std::string &course_name) -> std::string {
     absl::StatusOr<std::string> retrieved_or =
-        retrieveFromWeaviate(course_name);
+        retrieveFromWeaviate(course_name, u_major_key, major_ingest_status_file);
     std::string retrieved_context =
         retrieved_or.ok() ? *retrieved_or : "No retrieval context available.";
     const std::string prompt = absl::StrCat(
@@ -476,7 +621,8 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
     if (major_name == "unspecified" || major_name == "none") {
       return "No major provided.";
     }
-    absl::StatusOr<std::string> retrieved_or = retrieveFromWeaviate(major_name);
+    absl::StatusOr<std::string> retrieved_or =
+        retrieveFromWeaviate(major_name, u_major_key, major_ingest_status_file);
     std::string retrieved_context =
         retrieved_or.ok() ? *retrieved_or : "No retrieval context available.";
     const std::string prompt = absl::StrCat(
@@ -886,7 +1032,8 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                   "Skipped: retrieve_from_weaviate missing string query.";
             } else {
               absl::StatusOr<std::string> retrieval_or =
-                  retrieveFromWeaviate(args.at("query").get<std::string>());
+                  retrieveFromWeaviate(args.at("query").get<std::string>(),
+                                       u_major_key, major_ingest_status_file);
               if (retrieval_or.ok()) {
                 log_entry.success = true;
                 log_entry.summary = absl::StrCat(
