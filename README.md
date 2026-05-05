@@ -1,90 +1,70 @@
 # CCAdvisorAgent
 
-LLM-powered advising assistant for Colorado College students.
+`CCAdvisorAgent` is a C++ advising assistant for Colorado College planning workflows.  
+It combines structured profile intake, retrieval over catalog content, and LLM reasoning to
+produce grounded advising responses.
 
-The project combines:
-- scraping CC academic pages,
-- generating embeddings with Gemini,
-- storing and retrieving chunks in Weaviate,
-- and an emerging chat loop for advising-style interactions.
+## Core Capabilities
 
-## Current Status
+- Collects student context through a preliminary onboarding flow.
+- Ingests major-specific catalog data into Weaviate with embeddings.
+- Runs major-aware retrieval with readiness/fallback signaling while ingestion is in progress.
+- Supports tool-based operations (`scrape`, `retrieve_from_weaviate`) plus direct responder flow.
+- Generates memory-updated advising conversations and a final markdown plan artifact.
 
-Implemented today:
-- C++17 project with CMake + FetchContent dependencies (`absl`, `cpr`, `nlohmann/json`)
-- scraping utilities and data pipeline scripts
-- Gemini generation and embedding clients
-- Weaviate REST/GraphQL integration (insert + `nearVector` retrieval)
-- ingestion executable to populate Weaviate from `data/rawscrape/*.jsonl`
-- integration-style test runners for Gemini, tool-calling, and Weaviate paths
+## Architecture Overview
 
-Planned next:
-- richer chat orchestration and tool routing
-- clearer prompt/grounding pipeline
-- evaluation harness for advising quality and safety
-- more robust retrieval/reranking strategy and prerequisite-aware reasoning
+- **LLM clients**: Gemini generation and embedding interfaces.
+- **Storage**: Weaviate `CourseChunk` class for embedded chunks.
+- **Metadata**: stored per chunk (`major_key`, `major_name`, `course_code`, source fields).
+- **Ingestion modes**:
+  - Legacy batch ingestion from local JSONL (`send_data_to_weaviate`).
+  - Major-agnostic runtime ingestion (`major_ingest_runner`) launched from onboarding.
+- **Chat orchestration**: planner -> orchestrator/tools -> observer/responder -> memory -> decider.
 
-## Repository Layout
+## Requirements
 
-```text
-CCAdvisorAgent/
-├── include/app/
-│   ├── common/
-│   ├── conversation/
-│   ├── geminiclient/
-│   ├── toolcalling/
-│   └── weaviate/
-├── src/app/
-│   ├── conversation/
-│   ├── geminiclient/
-│   ├── toolcalling/
-│   └── weaviate/
-├── scripts/
-│   ├── populate_data_file.sh
-│   ├── config_weaviate.sh
-│   ├── scraperscript.cc
-│   └── send_data_to_weaviate.cc
-├── data/rawscrape/
-├── docker/
-│   └── docker-compose.yml
-├── tests/
-├── docs/
-├── CMakeLists.txt
-└── main.cc
-```
-
-## Prerequisites
-
-- macOS/Linux with C++17 toolchain
+- macOS or Linux
 - CMake 3.14+
-- Docker (for Weaviate)
+- C++17 toolchain
+- Docker (for local Weaviate)
 - API keys:
   - `GEMINI_API_KEY`
   - `JINA_AI_API_KEY`
 
-Create a local `.env` (ignored by git):
+Create a local `.env` in repo root:
 
 ```bash
 GEMINI_API_KEY=your_key_here
 JINA_AI_API_KEY=your_key_here
 ```
 
-## Build
-
-From repo root:
+Load env vars in your current shell before running binaries:
 
 ```bash
-cmake -S . -B build
-cmake --build build
+set -a
+source .env
+set +a
+```
+
+## Build
+
+From repository root:
+
+```bash
+cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build -j
 ```
 
 Primary targets:
-- `AdvisorAgBuild` (main app / integrated runner)
-- `scraper_script`
-- `weaviate_tests_runner`
-- `send_data_to_weaviate`
 
-## Local Weaviate Setup
+- `AdvisorAgBuild` - main executable (tests + chat sandbox entrypoint)
+- `major_ingest_runner` - major-agnostic scrape/embed/populate pipeline
+- `send_data_to_weaviate` - batch ingest from local JSONL files
+- `scraper_script` - scraper utility binary
+- `weaviate_tests_runner` - focused Weaviate integration tests
+
+## Local Weaviate
 
 Start Weaviate:
 
@@ -94,28 +74,69 @@ docker compose up -d
 cd ..
 ```
 
-Create schema (idempotent):
+Configure schema:
 
 ```bash
 bash scripts/config_weaviate.sh
 ```
 
-## Data Pipeline
+`config_weaviate.sh` is idempotent and now handles both class creation and required property
+upgrade checks.
 
-1. Scrape into JSONL:
+## Major-Agnostic Runtime Ingestion
+
+The onboarding flow launches background ingestion immediately after major capture.
+
+Manual run:
+
+```bash
+bash scripts/populate_major_in_background.sh "Computer Science"
+```
+
+Status file:
+
+```text
+data/major_ingest/<major_key>.status.json
+```
+
+Possible states:
+
+- `starting`
+- `running`
+- `ready`
+- `failed`
+
+The retrieval path is status-aware:
+
+- If status is `ready`, retrieval uses major-filtered Weaviate queries.
+- If status is not ready, it returns structured fallback context so chat can continue safely.
+
+## Legacy Batch Data Pipeline (Optional)
+
+If you want to pre-populate from local JSONL scrape outputs:
 
 ```bash
 bash scripts/populate_data_file.sh
-```
-
-2. Embed + ingest into Weaviate:
-
-```bash
-set -a && source .env && set +a
 ./build/send_data_to_weaviate
 ```
 
-3. Quick sanity check object count:
+## Running the App
+
+```bash
+./build/AdvisorAgBuild
+```
+
+At launch, the app enters onboarding/chat directly.
+
+## Verification and Testing
+
+### 1) Build verification
+
+```bash
+cmake --build build --target AdvisorAgBuild major_ingest_runner send_data_to_weaviate -j
+```
+
+### 2) Weaviate object count sanity check
 
 ```bash
 curl -sS "http://localhost:8080/v1/graphql" \
@@ -123,59 +144,50 @@ curl -sS "http://localhost:8080/v1/graphql" \
   -d '{"query":"{ Aggregate { CourseChunk { meta { count } } } }"}'
 ```
 
-## Tests
-
-Run Weaviate-only tests:
+### 3) Weaviate-focused tests
 
 ```bash
 ./build/weaviate_tests_runner
 ```
 
-Run integrated tests from main target:
+### 4) Tooling tests
 
-```bash
-./build/AdvisorAgBuild
+`AdvisorAgBuild` runs integrated tests before chat starts.
+Use dedicated test binaries and targets (for example `weaviate_tests_runner`) for
+focused validation.
+
+## Repository Structure
+
+```text
+CCAdvisorAgent/
+├── include/app/                 # public headers
+├── src/app/                     # implementation
+├── scripts/                     # ingestion/schema helper scripts + tool binaries
+├── data/                        # scraped and ingestion status artifacts
+├── docker/                      # local Weaviate runtime
+├── tests/                       # integration-style tests
+├── docs/
+├── CMakeLists.txt
+└── main.cc
 ```
 
-Notes:
-- Some tests depend on live services and environment variables.
-- Gemini-dependent paths require `GEMINI_API_KEY`.
+## Troubleshooting
 
-## Design Notes
+- **Gemini 403 / PERMISSION_DENIED**
+  - Ensure `.env` is loaded in your current shell (`set -a; source .env; set +a`).
+  - Verify key presence: `echo "$GEMINI_API_KEY" | wc -c`.
 
-- Weaviate class currently uses single-vector storage with manual embeddings.
-- Ingestion uses deterministic object IDs to reduce duplicate inserts.
-- Retrieval path performs query embedding first, then GraphQL `nearVector`.
+- **Binary not found**
+  - Correct main executable name is `AdvisorAgBuild`.
+  - From repo root: `./build/AdvisorAgBuild`.
+  - From `build/`: `./AdvisorAgBuild`.
 
-## Roadmap (Short Horizon)
+- **Ingestion status stays `failed`**
+  - Confirm Docker Weaviate is up.
+  - Run `bash scripts/config_weaviate.sh` manually and inspect output.
+  - Verify both API keys are loaded.
 
-- Harden chat manager loop (`conversation/`) for real user sessions
-- Introduce tool gating policy (when to scrape vs retrieve vs answer)
-- Add retrieval filtering/reranking and confidence thresholds
-- Build eval sets for accuracy, citation quality, and safe escalation
-- Add prerequisite extraction enrichment from linked course pages
+## Notes
 
-
-Set up:
-
-copy .env-example into .env and get API keys for all listed values
-
-run these commands:
-
-``` bash
-set -a 
-source .env
-set +a
-
-Cmake stuff: 
-
-bash scripts/populate_data_file.sh
-bash scripts/configure_weaviate.sh
-
-cd docker
-docker compose up -d
-cd ..
-
-
-
-```
+- This project is actively evolving; interfaces and prompts may change as retrieval grounding
+  and evaluation coverage expand.
