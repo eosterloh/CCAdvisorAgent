@@ -134,3 +134,13 @@ target_link_libraries(send_data_to_weaviate PRIVATE
   cpr::cpr
   nlohmann_json::nlohmann_json
 )
+
+add_executable(
+  concurrency_practice
+  concurency.cc
+)
+
+target_link_libraries(concurrency_practice PRIVATE
+  absl::synchronization
+  absl::time
+)

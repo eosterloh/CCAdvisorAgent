@@ -47,16 +47,20 @@ absl::Status weaviateClient::embed(const EmbeddedRecord &e) {
                     {"chunk_text", e.chunk_text}}},
                   {"vector", e.embedding}};
   cpr::Body body = payload.dump();
+
   cpr::Header header{{"Content-Type", "application/json"}};
+
   cpr::Response r = cpr::Post(endpoint, header, body);
+
   if (r.error || r.status_code >= 400) {
     LOG(ERROR) << "Weaviate embed request failed. HTTP " << r.status_code
                << ", transport error: " << r.error.message
                << ", response body: " << r.text;
-    return absl::InternalError(absl::StrCat(
-        "Sending embeddings to database "
-        "failed: ",
-        r.error.message, " (HTTP ", r.status_code, ") ", "body=", r.text));
+    std::string message = absl::StrCat("Sending embeddings to database "
+                                       "failed: ",
+                                       r.error.message, " (HTTP ",
+                                       r.status_code, ") ", "body=", r.text);
+    return absl::InternalError(message);
   } else {
     return absl::OkStatus();
   }
@@ -69,6 +73,7 @@ weaviateClient::retreive(std::string_view query) {
   if (!embed_status.ok()) {
     return embed_status;
   }
+
   absl::StatusOr<EmbeddedRecord> query_record_or = embedder.getContent();
   if (!query_record_or.ok()) {
     return query_record_or.status();
@@ -92,11 +97,14 @@ weaviateClient::retreive(std::string_view query) {
       "_additional { id distance } } } }");
 
   cpr::Url endpoint{"http://localhost:8080/v1/graphql"};
-  json payload = {{"query", graphql_query}};
 
+  json payload = {{"query", graphql_query}};
   cpr::Body body = payload.dump();
+
   cpr::Header header{{"Content-Type", "application/json"}};
+
   cpr::Response r = cpr::Post(endpoint, header, body);
+
   if (r.error || r.status_code >= 400) {
     LOG(ERROR) << "Weaviate GraphQL request failed. HTTP " << r.status_code
                << ", transport error: " << r.error.message
@@ -122,22 +130,28 @@ weaviateClient::retreive(std::string_view query) {
       obj.contains("source_path") && obj["source_path"].is_string()
           ? obj["source_path"].get<std::string>()
           : "";
+
   record.source_url =
       obj.contains("source_url") && obj["source_url"].is_string()
           ? obj["source_url"].get<std::string>()
           : "";
+
   if (obj.contains("course_code") && obj["course_code"].is_string()) {
     record.course_code = obj["course_code"].get<std::string>();
   } else {
     record.course_code = std::nullopt;
   }
+
   record.course_title = obj.contains("title") && obj["title"].is_string()
                             ? obj["title"].get<std::string>()
                             : "";
+
   record.chunk_text =
       obj.contains("chunk_text") && obj["chunk_text"].is_string()
           ? obj["chunk_text"].get<std::string>()
           : "";
+
   record.embedding.clear();
+
   return record;
 }

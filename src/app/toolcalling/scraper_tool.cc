@@ -36,9 +36,12 @@ absl::StatusOr<std::string> Scraper::scrapeFromUrl(std::string_view url) {
     LOG(ERROR) << "JINA_AI_API_KEY is empty; cannot execute scraper request.";
     return absl::InternalError("API key incorrectly read from .env");
   }
+
   std::string newurl = absl::StrCat("https://r.jina.ai/", url);
   cpr::Url u{newurl};
+
   cpr::Header h;
+
   if (json_format) {
     h = {{"Accept", "application/json"},
          {"Authorization", absl::StrCat("Bearer ", jinaapikey)}};

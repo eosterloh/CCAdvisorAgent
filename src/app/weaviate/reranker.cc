@@ -1,7 +1,7 @@
+#include "app/weaviate/reranker.hpp"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "app/geminiclient/gemini_generation.hpp"
-#include "app/weaviate/reranker.hpp"
 
 #include <absl/status/statusor.h>
 #include <nlohmann/json.hpp>
@@ -30,6 +30,7 @@ absl::StatusOr<std::string> Reranker::rerank(std::string_view retrieved,
       "- penalize generic/off-topic chunks\n\n"
       "User query:\n",
       query, "\n\nRetrieved candidates:\n", retrieved);
+
   absl::Status err = g.geminiGen(prompt);
   if (!err.ok()) {
     return err;
