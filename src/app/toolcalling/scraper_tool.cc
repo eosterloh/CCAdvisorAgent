@@ -18,6 +18,7 @@ std::string ScraperDescription =
     "Fetches web page content from a provided URL using Jina Reader. Use this "
     "tool when you need up-to-date source text for advising questions; returns "
     "either plain markdown/text or JSON depending on scraper mode.";
+constexpr int kHttpTimeoutMs = 30000;
 }
 
 Scraper::Scraper() {
@@ -49,7 +50,7 @@ absl::StatusOr<std::string> Scraper::scrapeFromUrl(std::string_view url) {
     h = {{"Authorization", absl::StrCat("Bearer ", jinaapikey)}};
   }
 
-  cpr::Response r = cpr::Get(u, h);
+  cpr::Response r = cpr::Get(u, h, cpr::Timeout{kHttpTimeoutMs});
   if (r.status_code != 200) {
     LOG(ERROR) << "Scraper request failed with HTTP " << r.status_code
                << ", URL: " << newurl;

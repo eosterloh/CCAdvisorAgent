@@ -13,6 +13,9 @@
 #include <vector>
 
 using json = nlohmann::json;
+namespace {
+constexpr int kHttpTimeoutMs = 30000;
+}
 
 GeminiEmbedding::GeminiEmbedding() { GeminiRequests{}; }
 
@@ -68,7 +71,7 @@ absl::Status GeminiEmbedding::embed(std::string_view chunk) {
 
   const cpr::Response r = cpr::Post(
       cpr::Url{url}, cpr::Header{{"Content-Type", "application/json"}},
-      cpr::Body{payload.dump()});
+      cpr::Body{payload.dump()}, cpr::Timeout{kHttpTimeoutMs});
 
   if (r.status_code != 200) {
     LOG(ERROR) << "Embedding request failed with HTTP " << r.status_code
@@ -170,7 +173,7 @@ absl::Status GeminiEmbedding::embedFile(std::string_view filepath) {
     const json payload = {{"content", {{"parts", {{{"text", chunk}}}}}}};
     const cpr::Response r = cpr::Post(
         cpr::Url{url}, cpr::Header{{"Content-Type", "application/json"}},
-        cpr::Body{payload.dump()});
+        cpr::Body{payload.dump()}, cpr::Timeout{kHttpTimeoutMs});
     if (r.status_code != 200) {
       return absl::InternalError(
           absl::StrCat("Embedding request failed on line ", line_number, "."));

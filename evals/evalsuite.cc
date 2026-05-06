@@ -36,6 +36,7 @@ Expected/rule fields to support in each case:
 - max_phase_latency_ms: { "planner": 8000, "observer": 8000 }
 - must_finish_with_decider_done: false (often false for single-turn smoke)
 - require_tool_name: "retrieve_from_weaviate" (optional)
+- expect_input_rejection: true (optional; skip helpfulness checks, require prompt text)
 
 3) Sample Run Query Flow (One Case)
 -----------------------------------
@@ -97,6 +98,7 @@ Tier 3 (stretch):
 #include "nlohmann/json.hpp"
 
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -319,6 +321,7 @@ MetricCheck evaluateActionability(const std::string &advisor_text) {
 }
 
 EvalCaseResult runOneTest(const EvalTestCase &test) {
+  std::cout << "[eval] Starting case: " << test.id << std::endl;
   chat_manager manager;
   if (test.mode == "test") {
     manager.loadTestProfilePreset();
@@ -333,9 +336,13 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
   const std::string advisor_text = extractAdvisorText(transcript);
 
   if (!status.ok()) {
+    std::cout << "[eval] Case failed early: " << test.id
+              << " reason=chat() failed" << std::endl;
     return {test.id, false, absl::StrCat("chat() failed: ", status)};
   }
   if (!allCriticalPhasesSucceeded(events)) {
+    std::cout << "[eval] Case failed: " << test.id
+              << " reason=critical phase failure" << std::endl;
     return {test.id, false, "One or more critical phases failed."};
   }
 
@@ -346,6 +353,9 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
         continue;
       }
       if (!containsPhase(events, phase.get<std::string>())) {
+        std::cout << "[eval] Case failed: " << test.id
+                  << " reason=missing phase " << phase.get<std::string>()
+                  << std::endl;
         return {
             test.id, false,
             absl::StrCat("Missing required phase: ", phase.get<std::string>())};
@@ -357,6 +367,8 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       test.expected.at("min_successful_tools").is_number_integer()) {
     const int min_tools = test.expected.at("min_successful_tools").get<int>();
     if (countSuccessfulTools(events) < min_tools) {
+      std::cout << "[eval] Case failed: " << test.id
+                << " reason=insufficient successful tools" << std::endl;
       return {test.id, false, "Not enough successful tool calls."};
     }
   }
@@ -366,6 +378,9 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
     const std::string required_tool =
         test.expected.at("require_tool_name").get<std::string>();
     if (!hasSuccessfulToolName(events, required_tool)) {
+      std::cout << "[eval] Case failed: " << test.id
+                << " reason=required tool missing " << required_tool
+                << std::endl;
       return {test.id, false,
               absl::StrCat("Required tool was not successfully called: ",
                            required_tool)};
@@ -381,6 +396,8 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
         continue;
       }
       if (!phaseLatencyUnder(events, it.key(), it.value().get<int>())) {
+        std::cout << "[eval] Case failed: " << test.id
+                  << " reason=latency exceeded for " << it.key() << std::endl;
         return {test.id, false,
                 absl::StrCat("Latency limit exceeded for phase: ", it.key())};
       }
@@ -391,24 +408,62 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       test.expected.at("must_finish_with_decider_done").is_boolean() &&
       test.expected.at("must_finish_with_decider_done").get<bool>() &&
       !deciderDoneObserved(events)) {
+    std::cout << "[eval] Case failed: " << test.id
+              << " reason=decider done not observed" << std::endl;
     return {test.id, false, "Decider did not report done=true."};
+  }
+
+  const bool expect_input_rejection =
+      test.expected.contains("expect_input_rejection") &&
+      test.expected.at("expect_input_rejection").is_boolean() &&
+      test.expected.at("expect_input_rejection").get<bool>();
+  if (expect_input_rejection) {
+    const std::string tl = absl::AsciiStrToLower(transcript);
+    if (!absl::StrContains(tl, "please enter a question")) {
+      std::cout << "[eval] Case failed: " << test.id
+                << " reason=missing input rejection guidance" << std::endl;
+      return {test.id, false,
+              "Expected prompt to reject empty input (no guidance text)."};
+    }
+    bool saw_input_trace = false;
+    for (const TraceEvent &e : events) {
+      if (e.phase == "input") {
+        saw_input_trace = true;
+        break;
+      }
+    }
+    if (!saw_input_trace) {
+      std::cout << "[eval] Case failed: " << test.id
+                << " reason=missing input phase trace" << std::endl;
+      return {test.id, false, "Expected input-phase trace on empty query."};
+    }
+    std::cout << "[eval] Case passed: " << test.id
+              << " (input rejection)" << std::endl;
+    return {test.id, true, "pass (empty input handled)"};
   }
 
   const MetricCheck helpfulness = evaluateHelpfulness(advisor_text);
   if (!helpfulness.pass) {
+    std::cout << "[eval] Case failed: " << test.id
+              << " reason=helpfulness metric" << std::endl;
     return {test.id, false, helpfulness.reason};
   }
 
   const MetricCheck faithfulness = evaluateFaithfulness(events, test);
   if (!faithfulness.pass) {
+    std::cout << "[eval] Case failed: " << test.id
+              << " reason=faithfulness metric" << std::endl;
     return {test.id, false, faithfulness.reason};
   }
 
   const MetricCheck actionability = evaluateActionability(advisor_text);
   if (!actionability.pass) {
+    std::cout << "[eval] Case failed: " << test.id
+              << " reason=actionability metric" << std::endl;
     return {test.id, false, actionability.reason};
   }
 
+  std::cout << "[eval] Case passed: " << test.id << std::endl;
   return {test.id, true, "pass"};
 }
 
@@ -420,6 +475,7 @@ std::string evalsuite() {
     return "No eval cases loaded from evals/cases.jsonl";
   }
 
+  std::cout << "[eval] Loaded " << testcases.size() << " test cases." << std::endl;
   int tests_passed = 0;
   std::ostringstream report;
   report << "Eval results:\n";

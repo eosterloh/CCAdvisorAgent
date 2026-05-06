@@ -7,7 +7,9 @@
 #include <cpr/cpr.h>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
+#include <string>
 
 using json = nlohmann::json;
 
@@ -23,6 +25,7 @@ std::string EscapeGraphqlString(std::string_view input) {
   }
   return escaped;
 }
+constexpr int kHttpTimeoutMs = 15000;
 } // namespace
 
 std::string weaviateClient::HashRecordKey(const EmbeddedRecord &record) const {
@@ -66,7 +69,8 @@ absl::Status weaviateClient::embed(const EmbeddedRecord &e) {
 
   cpr::Header header{{"Content-Type", "application/json"}};
 
-  cpr::Response r = cpr::Post(endpoint, header, body);
+  cpr::Response r = cpr::Post(endpoint, header, body,
+                              cpr::Timeout{kHttpTimeoutMs});
 
   if (r.error || r.status_code >= 400) {
     LOG(ERROR) << "Weaviate embed request failed. HTTP " << r.status_code
@@ -107,43 +111,71 @@ absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string_view query,
     vector_stream << query_record_or->embedding.at(i);
   }
 
+  cpr::Url endpoint{"http://localhost:8080/v1/graphql"};
+  cpr::Header header{{"Content-Type", "application/json"}};
+
+  auto run_query = [&](const std::string &where_clause)
+      -> absl::StatusOr<json> {
+    const std::string graphql_query = absl::StrCat(
+        "{ Get { CourseChunk(nearVector: {vector: [", vector_stream.str(),
+        "]}", where_clause,
+        ", limit: 10) { major_key major_name course_code title source_url "
+        "source_path chunk_text _additional { id distance } } } }");
+    json payload = {{"query", graphql_query}};
+    cpr::Response r = cpr::Post(endpoint, header, cpr::Body{payload.dump()},
+                                cpr::Timeout{kHttpTimeoutMs});
+    if (r.error || r.status_code >= 400) {
+      LOG(ERROR) << "Weaviate GraphQL request failed. HTTP " << r.status_code
+                 << ", transport error: " << r.error.message
+                 << ", response body: " << r.text;
+      return absl::InternalError(
+          absl::StrCat("GraphQL query failed: ", r.error.message, " (HTTP ",
+                       r.status_code, ") body=", r.text));
+    }
+    return json::parse(r.text, nullptr, false);
+  };
+
+  auto has_results = [](const json &response_json) {
+    return !response_json.is_discarded() && response_json.contains("data") &&
+           response_json["data"].contains("Get") &&
+           response_json["data"]["Get"].contains("CourseChunk") &&
+           response_json["data"]["Get"]["CourseChunk"].is_array() &&
+           !response_json["data"]["Get"]["CourseChunk"].empty();
+  };
+
   std::string where_clause;
-  if (!major_key.empty()) {
+  if (!major_key.empty() && major_key != "undeclared") {
     where_clause = absl::StrCat(
         ", where: {path: [\"major_key\"], operator: Equal, valueText: \"",
         EscapeGraphqlString(major_key), "\"}");
   }
-  const std::string graphql_query = absl::StrCat(
-      "{ Get { CourseChunk(nearVector: {vector: [", vector_stream.str(),
-      "]}", where_clause,
-      ", limit: 10) { major_key major_name course_code title source_url "
-      "source_path chunk_text _additional { id distance } } } }");
 
-  cpr::Url endpoint{"http://localhost:8080/v1/graphql"};
+  absl::StatusOr<json> filtered_or = run_query(where_clause);
+  if (!filtered_or.ok()) {
+    return filtered_or.status();
+  }
+  json response_json = *std::move(filtered_or);
 
-  json payload = {{"query", graphql_query}};
-  cpr::Body body = payload.dump();
-
-  cpr::Header header{{"Content-Type", "application/json"}};
-
-  cpr::Response r = cpr::Post(endpoint, header, body);
-
-  if (r.error || r.status_code >= 400) {
-    LOG(ERROR) << "Weaviate GraphQL request failed. HTTP " << r.status_code
-               << ", transport error: " << r.error.message
-               << ", response body: " << r.text;
-    return absl::InternalError(
-        absl::StrCat("GraphQL query failed: ", r.error.message, " (HTTP ",
-                     r.status_code, ") body=", r.text));
+  // If a major filter was applied but returned nothing, retry unfiltered so
+  // retrieval still produces evidence for users whose major has not ingested.
+  if (!has_results(response_json) && !where_clause.empty()) {
+    static std::set<std::string> already_warned_majors;
+    const std::string key{major_key};
+    if (already_warned_majors.insert(key).second) {
+      LOG(WARNING)
+          << "Weaviate filtered query returned no chunks for major_key="
+          << key
+          << "; falling back to unfiltered retrieval (will not warn again).";
+    }
+    absl::StatusOr<json> fallback_or = run_query(/*where_clause=*/"");
+    if (!fallback_or.ok()) {
+      return fallback_or.status();
+    }
+    response_json = *std::move(fallback_or);
   }
 
-  const json response_json = json::parse(r.text, nullptr, false);
-  if (response_json.is_discarded() || !response_json.contains("data") ||
-      !response_json["data"].contains("Get") ||
-      !response_json["data"]["Get"].contains("CourseChunk") ||
-      !response_json["data"]["Get"]["CourseChunk"].is_array() ||
-      response_json["data"]["Get"]["CourseChunk"].empty()) {
-    LOG(ERROR) << "Weaviate GraphQL response missing CourseChunk data.";
+  if (!has_results(response_json)) {
+    LOG(WARNING) << "Weaviate returned no CourseChunk objects for query.";
     return absl::InternalError("No CourseChunk objects found.");
   }
 

@@ -6,6 +6,10 @@
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
+namespace {
+constexpr int kHttpTimeoutMs = 60000;
+constexpr int kHttpConnectTimeoutMs = 10000;
+}
 GeminiGenerator::GeminiGenerator() { GeminiRequests{}; }
 GeminiGenerator::~GeminiGenerator() {}
 absl::Status GeminiGenerator::geminiGen(std::string_view query,
@@ -24,7 +28,10 @@ absl::Status GeminiGenerator::geminiGen(std::string_view query,
   json bodyjson = {
       {"contents", {{{"parts", {{{"text", std::string(query)}}}}}}}};
   cpr::Body body = bodyjson.dump();
-  cpr::Response r = cpr::Post(endpoint, params, header, body);
+  cpr::Response r = cpr::Post(
+      endpoint, params, header, body,
+      cpr::Timeout{std::chrono::milliseconds{kHttpTimeoutMs}},
+      cpr::ConnectTimeout{std::chrono::milliseconds{kHttpConnectTimeoutMs}});
 
   if (r.error) {
     LOG(ERROR) << "Gemini generation request transport failed: " << r.error.message;
