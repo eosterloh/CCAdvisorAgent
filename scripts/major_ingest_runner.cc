@@ -23,8 +23,10 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
-constexpr const char *kProgramsIndexUrl =
-    "https://coursecatalog.coloradocollege.edu/programs/";
+constexpr const char *kDepartmentsIndexUrl =
+    "https://coursecatalog.coloradocollege.edu/departments/";
+constexpr const char *kCatalogHost =
+    "https://coursecatalog.coloradocollege.edu";
 
 std::string NormalizeText(std::string value) {
   absl::AsciiStrToLower(&value);
@@ -59,62 +61,11 @@ std::vector<std::string> Tokenize(std::string_view normalized) {
   return tokens;
 }
 
-std::string ParseMajorKeyFromProgramUrl(std::string_view program_url) {
-  const std::regex key_regex("/programs/([A-Za-z0-9\\-]+)");
-  std::smatch match;
-  const std::string url(program_url);
-  if (std::regex_search(url, match, key_regex) &&
-      match.size() > 1) {
-    return NormalizeText(match[1].str());
-  }
-  return "";
-}
-
-std::string JsonLineFromPayload(const std::string &payload_json) {
-  const json parsed = json::parse(payload_json, nullptr, false);
-  if (parsed.is_discarded()) {
-    return "";
-  }
-
-  if (parsed.contains("data") && parsed["data"].is_object() &&
-      parsed["data"].contains("content") && parsed["data"]["content"].is_string()) {
-    return parsed.dump();
-  }
-  if (parsed.contains("content") && parsed["content"].is_string()) {
-    return parsed.dump();
-  }
-  return "";
-}
-
-absl::Status WriteJsonl(const fs::path &path, const std::vector<std::string> &lines) {
-  std::ofstream out(path);
-  if (!out.is_open()) {
-    return absl::InternalError(
-        absl::StrCat("Failed to open file for writing: ", path.string()));
-  }
-  for (const std::string &line : lines) {
-    out << line << '\n';
-  }
-  return absl::OkStatus();
-}
-
-std::vector<std::pair<std::string, std::string>>
-ExtractProgramLinks(const std::string &programs_markdown) {
-  std::vector<std::pair<std::string, std::string>> links;
-  const std::regex link_regex(
-      R"(\[([^\]]+)\]\((https?://coursecatalog\.coloradocollege\.edu/programs/[^)\s]+)\))");
-  for (std::sregex_iterator it(programs_markdown.begin(), programs_markdown.end(),
-                               link_regex);
-       it != std::sregex_iterator(); ++it) {
-    links.emplace_back((*it)[1].str(), (*it)[2].str());
-  }
-  return links;
-}
-
 std::string AcronymFromTokens(const std::vector<std::string> &tokens) {
   std::string acronym;
   for (const std::string &token : tokens) {
-    if (!token.empty() && std::isalpha(static_cast<unsigned char>(token.front())) != 0) {
+    if (!token.empty() &&
+        std::isalpha(static_cast<unsigned char>(token.front())) != 0) {
       acronym.push_back(token.front());
     }
   }
@@ -131,6 +82,16 @@ std::string CanonicalizeMajorInput(std::string input) {
       {"math", "mathematics"},
       {"bio", "biology"},
       {"psych", "psychology"},
+      {"poli sci", "political science"},
+      {"polisci", "political science"},
+      {"polysci", "political science"},
+      {"ir", "international political economy"},
+      {"anthro", "anthropology"},
+      {"chem", "chemistry"},
+      {"phys", "physics"},
+      {"phil", "philosophy"},
+      {"theatre", "theatre dance"},
+      {"theater", "theatre dance"},
   };
   for (const auto &entry : aliases) {
     if (normalized == entry.first) {
@@ -140,112 +101,283 @@ std::string CanonicalizeMajorInput(std::string input) {
   return normalized;
 }
 
-struct ProgramMatch {
+// Classic dynamic-programming Levenshtein distance.
+int LevenshteinDistance(std::string_view a, std::string_view b) {
+  const std::size_t m = a.size();
+  const std::size_t n = b.size();
+  if (m == 0) {
+    return static_cast<int>(n);
+  }
+  if (n == 0) {
+    return static_cast<int>(m);
+  }
+  std::vector<int> prev(n + 1);
+  std::vector<int> curr(n + 1);
+  for (std::size_t j = 0; j <= n; ++j) {
+    prev[j] = static_cast<int>(j);
+  }
+  for (std::size_t i = 1; i <= m; ++i) {
+    curr[0] = static_cast<int>(i);
+    for (std::size_t j = 1; j <= n; ++j) {
+      const int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+      curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost});
+    }
+    std::swap(prev, curr);
+  }
+  return prev[n];
+}
+
+// Returns similarity in [0.0, 1.0] using edit distance over max length.
+double SimilarityRatio(std::string_view a, std::string_view b) {
+  const std::size_t max_len = std::max(a.size(), b.size());
+  if (max_len == 0) {
+    return 1.0;
+  }
+  const int distance = LevenshteinDistance(a, b);
+  return 1.0 - static_cast<double>(distance) / static_cast<double>(max_len);
+}
+
+struct Department {
+  std::string code;
   std::string label;
-  std::string url;
-  int score;
+  std::string overview_url;
 };
 
-int MatchScore(std::string_view canonical_major, std::string_view candidate_label,
-               std::string_view candidate_url) {
-  const std::string normalized_target = CanonicalizeMajorInput(std::string(canonical_major));
-  const std::vector<std::string> target_tokens = Tokenize(normalized_target);
-  const std::vector<std::string> label_tokens =
-      Tokenize(NormalizeText(std::string(candidate_label)));
+struct DepartmentMatch {
+  Department department;
+  int score = 0;
+  std::string reason;
+};
+
+int ScoreDepartment(std::string_view canonical_target,
+                    const Department &candidate) {
+  const std::string target_norm{canonical_target};
+  const std::string code_lower = absl::AsciiStrToLower(candidate.code);
+  const std::string label_norm = NormalizeText(candidate.label);
+  const std::vector<std::string> target_tokens = Tokenize(target_norm);
+  const std::vector<std::string> label_tokens = Tokenize(label_norm);
   const std::string target_acronym = AcronymFromTokens(target_tokens);
   const std::string label_acronym = AcronymFromTokens(label_tokens);
-  const std::string candidate_key = ParseMajorKeyFromProgramUrl(candidate_url);
-  const std::string candidate_blob =
-      NormalizeText(absl::StrCat(candidate_label, " ", candidate_url, " ", candidate_key));
 
   int score = 0;
-  if (!normalized_target.empty() && candidate_blob.find(normalized_target) != std::string::npos) {
-    score += 12;
+  if (target_norm == code_lower) {
+    score += 25;
   }
-  if (!candidate_key.empty() && normalized_target.find(candidate_key) != std::string::npos) {
-    score += 6;
+  if (!target_norm.empty() &&
+      label_norm.find(target_norm) != std::string::npos) {
+    score += 15;
   }
   if (!target_acronym.empty() && target_acronym == label_acronym) {
-    score += 8;
+    score += 10;
+  }
+  if (!target_acronym.empty() && target_acronym == code_lower) {
+    score += 10;
   }
   for (const std::string &token : target_tokens) {
     if (token.size() < 3) {
       continue;
     }
-    if (candidate_blob.find(token) != std::string::npos) {
-      score += 3;
+    if (label_norm.find(token) != std::string::npos) {
+      score += 4;
     }
+  }
+  // Typo-tolerance: contribute up to +12 by similarity to label or code.
+  const double label_sim = SimilarityRatio(target_norm, label_norm);
+  const double code_sim = SimilarityRatio(target_norm, code_lower);
+  const double best_sim = std::max(label_sim, code_sim);
+  if (best_sim >= 0.55) {
+    score += static_cast<int>(best_sim * 12.0);
+  }
+  // Token-level fuzzy: best similarity of any user token vs any label token.
+  double best_token_sim = 0.0;
+  for (const std::string &t_target : target_tokens) {
+    if (t_target.size() < 3) {
+      continue;
+    }
+    for (const std::string &t_label : label_tokens) {
+      if (t_label.size() < 3) {
+        continue;
+      }
+      const double sim = SimilarityRatio(t_target, t_label);
+      best_token_sim = std::max(best_token_sim, sim);
+    }
+  }
+  if (best_token_sim >= 0.7) {
+    score += static_cast<int>(best_token_sim * 6.0);
   }
   return score;
 }
 
-absl::StatusOr<std::pair<std::string, std::string>>
-ResolveProgram(std::string_view major_input, Scraper &scraper) {
-  absl::StatusOr<std::string> programs_or =
-      scraper.scrapeFromUrl(kProgramsIndexUrl);
-  if (!programs_or.ok()) {
-    return programs_or.status();
+// Returns "Markdown content" payload string from Jina-shaped scrape JSON.
+std::string ExtractScrapeBody(const std::string &payload_json) {
+  const json parsed = json::parse(payload_json, nullptr, false);
+  if (parsed.is_discarded()) {
+    return "";
   }
-  const std::vector<std::pair<std::string, std::string>> links =
-      ExtractProgramLinks(*programs_or);
-  if (links.empty()) {
-    return absl::NotFoundError("No program links found in programs index.");
+  if (parsed.contains("data") && parsed["data"].is_object() &&
+      parsed["data"].contains("content") &&
+      parsed["data"]["content"].is_string()) {
+    return parsed["data"]["content"].get<std::string>();
   }
-
-  std::vector<ProgramMatch> matches;
-  matches.reserve(links.size());
-  for (const auto &entry : links) {
-    matches.push_back(
-        ProgramMatch{entry.first, entry.second,
-                     MatchScore(CanonicalizeMajorInput(std::string(major_input)),
-                                entry.first, entry.second)});
+  if (parsed.contains("content") && parsed["content"].is_string()) {
+    return parsed["content"].get<std::string>();
   }
-  std::sort(matches.begin(), matches.end(),
-            [](const ProgramMatch &a, const ProgramMatch &b) {
-              return a.score > b.score;
-            });
-
-  if (matches.empty() || matches.front().score < 8) {
-    return absl::NotFoundError(
-        "Could not confidently map major input to a catalog program URL. "
-        "Try the full major name as listed in the catalog.");
-  }
-  if (matches.size() > 1 && (matches.front().score - matches.at(1).score) <= 1) {
-    return absl::NotFoundError(absl::StrCat(
-        "Major input was ambiguous. Top matches were: ", matches.front().label,
-        ", ", matches.at(1).label, ". Please provide a more specific major."));
-  }
-  return std::make_pair(matches.front().label, matches.front().url);
+  return payload_json;
 }
 
-std::set<std::string> ExtractDepartmentCourseUrls(const std::string &program_payload) {
-  std::set<std::string> urls;
-  const json parsed = json::parse(program_payload, nullptr, false);
+std::string JsonLineFromPayload(const std::string &payload_json) {
+  const json parsed = json::parse(payload_json, nullptr, false);
   if (parsed.is_discarded()) {
-    return urls;
+    return "";
   }
-  std::string body;
   if (parsed.contains("data") && parsed["data"].is_object() &&
-      parsed["data"].contains("content") && parsed["data"]["content"].is_string()) {
-    body = parsed["data"]["content"].get<std::string>();
-  } else if (parsed.contains("content") && parsed["content"].is_string()) {
-    body = parsed["content"].get<std::string>();
+      parsed["data"].contains("content") &&
+      parsed["data"]["content"].is_string()) {
+    return parsed.dump();
   }
-  if (body.empty()) {
-    return urls;
+  if (parsed.contains("content") && parsed["content"].is_string()) {
+    return parsed.dump();
   }
+  return "";
+}
 
-  const std::regex dept_regex(
-      R"(https?://coursecatalog\.coloradocollege\.edu/departments/[A-Za-z0-9\-]+/courses)");
-  for (std::sregex_iterator it(body.begin(), body.end(), dept_regex);
+absl::Status WriteJsonl(const fs::path &path,
+                        const std::vector<std::string> &lines) {
+  std::ofstream out(path);
+  if (!out.is_open()) {
+    return absl::InternalError(
+        absl::StrCat("Failed to open file for writing: ", path.string()));
+  }
+  for (const std::string &line : lines) {
+    out << line << '\n';
+  }
+  return absl::OkStatus();
+}
+
+// Parse the markdown departments index for [Label](.../departments/CODE/...) entries.
+std::vector<Department> ParseDepartmentIndex(const std::string &body) {
+  std::vector<Department> departments;
+  std::set<std::string> seen_codes;
+  const std::regex link_regex(
+      R"(\[([^\]]+)\]\((https?://coursecatalog\.coloradocollege\.edu/departments/([A-Z]{2,6})(?:/[^)]*)?)\))");
+  for (std::sregex_iterator it(body.begin(), body.end(), link_regex);
        it != std::sregex_iterator(); ++it) {
-    urls.insert((*it)[0].str());
+    const std::string label = (*it)[1].str();
+    const std::string url = (*it)[2].str();
+    const std::string code = (*it)[3].str();
+    if (!seen_codes.insert(code).second) {
+      continue;
+    }
+    departments.push_back(Department{code, label, url});
+  }
+  return departments;
+}
+
+absl::StatusOr<std::vector<Department>>
+EnumerateDepartments(Scraper &scraper) {
+  absl::StatusOr<std::string> page_or =
+      scraper.scrapeFromUrl(kDepartmentsIndexUrl);
+  if (!page_or.ok()) {
+    return page_or.status();
+  }
+  const std::string body = ExtractScrapeBody(*page_or);
+  std::vector<Department> departments = ParseDepartmentIndex(body);
+  if (departments.empty()) {
+    return absl::NotFoundError(
+        "Departments index returned no parseable department links.");
+  }
+  return departments;
+}
+
+absl::StatusOr<DepartmentMatch>
+MatchDepartment(std::string_view major_input,
+                const std::vector<Department> &departments) {
+  const std::string canonical = CanonicalizeMajorInput(std::string(major_input));
+  std::vector<DepartmentMatch> matches;
+  matches.reserve(departments.size());
+  for (const Department &dept : departments) {
+    DepartmentMatch m;
+    m.department = dept;
+    m.score = ScoreDepartment(canonical, dept);
+    matches.push_back(std::move(m));
+  }
+  std::sort(matches.begin(), matches.end(),
+            [](const DepartmentMatch &a, const DepartmentMatch &b) {
+              return a.score > b.score;
+            });
+  if (matches.empty() || matches.front().score < 10) {
+    std::string hint = "Could not confidently map input '";
+    hint += std::string(major_input);
+    hint += "' to a catalog department. Closest candidates: ";
+    for (std::size_t i = 0; i < matches.size() && i < 3; ++i) {
+      if (i > 0) {
+        hint += ", ";
+      }
+      hint += matches[i].department.label;
+      hint += " (";
+      hint += matches[i].department.code;
+      hint += ", score=";
+      hint += std::to_string(matches[i].score);
+      hint += ")";
+    }
+    return absl::NotFoundError(hint);
+  }
+  // Require a clear margin so we never silently pick the wrong dept.
+  if (matches.size() > 1 &&
+      matches.front().score - matches.at(1).score < 4) {
+    std::string hint = "Department match for '";
+    hint += std::string(major_input);
+    hint += "' was ambiguous between: ";
+    hint += matches.front().department.label;
+    hint += " (" + matches.front().department.code + ")";
+    hint += " and ";
+    hint += matches.at(1).department.label;
+    hint += " (" + matches.at(1).department.code + "). ";
+    hint += "Re-run with a more specific name (e.g. include 'Department').";
+    return absl::FailedPreconditionError(hint);
+  }
+  return matches.front();
+}
+
+std::vector<std::string>
+ParseProgramLinksFromDeptPage(const std::string &body) {
+  std::set<std::string> unique_urls;
+  const std::regex prog_regex(
+      R"(https?://coursecatalog\.coloradocollege\.edu/programs/[A-Za-z0-9\-]+)");
+  for (std::sregex_iterator it(body.begin(), body.end(), prog_regex);
+       it != std::sregex_iterator(); ++it) {
+    unique_urls.insert((*it)[0].str());
+  }
+  // Also accept relative links like "/programs/COSC-BA-Major".
+  const std::regex rel_regex(R"((?:^|[^a-zA-Z])(/programs/[A-Za-z0-9\-]+))");
+  for (std::sregex_iterator it(body.begin(), body.end(), rel_regex);
+       it != std::sregex_iterator(); ++it) {
+    unique_urls.insert(absl::StrCat(kCatalogHost, (*it)[1].str()));
+  }
+  return std::vector<std::string>(unique_urls.begin(), unique_urls.end());
+}
+
+absl::StatusOr<std::vector<std::string>>
+ListProgramsInDepartment(Scraper &scraper, const std::string &dept_code) {
+  const std::string url =
+      absl::StrCat(kCatalogHost, "/departments/", dept_code, "/programs");
+  absl::StatusOr<std::string> page_or = scraper.scrapeFromUrl(url);
+  if (!page_or.ok()) {
+    return page_or.status();
+  }
+  const std::string body = ExtractScrapeBody(*page_or);
+  std::vector<std::string> urls = ParseProgramLinksFromDeptPage(body);
+  if (urls.empty()) {
+    return absl::NotFoundError(absl::StrCat(
+        "No /programs/ links found on department page: ", url));
   }
   return urls;
 }
 
-absl::Status EmbedAndPushFile(const fs::path &file_path, std::string_view major_key,
-                              std::string_view major_name, GeminiEmbedding &embedding,
+absl::Status EmbedAndPushFile(const fs::path &file_path,
+                              std::string_view major_key,
+                              std::string_view major_name,
+                              GeminiEmbedding &embedding,
                               weaviateClient &weaviate) {
   const absl::Status embed_status = embedding.embedFile(file_path.string());
   if (!embed_status.ok()) {
@@ -276,53 +408,93 @@ int main(int argc, char *argv[]) {
   const std::string major_key = argv[2];
 
   Scraper scraper(true);
-  absl::StatusOr<std::pair<std::string, std::string>> program_or =
-      ResolveProgram(major_name, scraper);
-  if (!program_or.ok()) {
-    std::cerr << "Failed to resolve major program: " << program_or.status() << '\n';
-    return 1;
-  }
-  const std::string resolved_program_name = program_or->first;
-  const std::string program_url = program_or->second;
 
-  absl::StatusOr<std::string> program_scrape_or = scraper.scrapeFromUrl(program_url);
-  if (!program_scrape_or.ok()) {
-    std::cerr << "Failed to scrape program page: " << program_scrape_or.status() << '\n';
+  // Step 1: enumerate all 35 departments from the catalog index.
+  absl::StatusOr<std::vector<Department>> departments_or =
+      EnumerateDepartments(scraper);
+  if (!departments_or.ok()) {
+    std::cerr << "Failed to enumerate departments: "
+              << departments_or.status() << '\n';
     return 1;
   }
+  std::cout << "Discovered " << departments_or->size()
+            << " departments from catalog index.\n";
+
+  // Step 2: fuzzy-match user's major input against the department list.
+  absl::StatusOr<DepartmentMatch> match_or =
+      MatchDepartment(major_name, *departments_or);
+  if (!match_or.ok()) {
+    std::cerr << "Department resolution failed: " << match_or.status() << '\n';
+    return 1;
+  }
+  const Department resolved = match_or->department;
+  std::cout << "Matched '" << major_name << "' -> " << resolved.label
+            << " (" << resolved.code << ", score=" << match_or->score
+            << ")\n";
 
   const fs::path working_dir =
       fs::path("data") / "major_ingest" / major_key / "raw";
   std::error_code mkdir_error;
   fs::create_directories(working_dir, mkdir_error);
   if (mkdir_error) {
-    std::cerr << "Failed to create ingest directory: " << mkdir_error.message() << '\n';
+    std::cerr << "Failed to create ingest directory: "
+              << mkdir_error.message() << '\n';
     return 1;
   }
 
-  const fs::path program_jsonl = working_dir / "program_requirements.jsonl";
-  const std::string program_line = JsonLineFromPayload(*program_scrape_or);
-  if (program_line.empty()) {
-    std::cerr << "Program scrape payload was not valid JSON.\n";
+  // Step 3: fetch /departments/<CODE>/programs and follow each /programs/...
+  // link to the actual major/minor page. Each page becomes one JSONL line.
+  absl::StatusOr<std::vector<std::string>> program_urls_or =
+      ListProgramsInDepartment(scraper, resolved.code);
+  if (!program_urls_or.ok()) {
+    std::cerr << "Failed to list programs in department " << resolved.code
+              << ": " << program_urls_or.status() << '\n';
     return 1;
   }
-  absl::Status write_status = WriteJsonl(program_jsonl, {program_line});
+  std::cout << "Found " << program_urls_or->size() << " program(s) in "
+            << resolved.code << ".\n";
+
+  std::vector<std::string> program_lines;
+  for (const std::string &program_url : *program_urls_or) {
+    absl::StatusOr<std::string> program_scrape_or =
+        scraper.scrapeFromUrl(program_url);
+    if (!program_scrape_or.ok()) {
+      std::cerr << "  warn: scrape failed for " << program_url << ": "
+                << program_scrape_or.status() << '\n';
+      continue;
+    }
+    const std::string line = JsonLineFromPayload(*program_scrape_or);
+    if (!line.empty()) {
+      program_lines.push_back(line);
+      std::cout << "  + " << program_url << '\n';
+    }
+  }
+  const fs::path program_jsonl = working_dir / "program_requirements.jsonl";
+  if (program_lines.empty()) {
+    std::cerr << "No program payloads were captured for department "
+              << resolved.code << ".\n";
+    return 1;
+  }
+  absl::Status write_status = WriteJsonl(program_jsonl, program_lines);
   if (!write_status.ok()) {
     std::cerr << write_status << '\n';
     return 1;
   }
 
+  // Step 4: scrape /departments/<CODE>/courses (single page works fine).
+  const std::string courses_url = absl::StrCat(
+      kCatalogHost, "/departments/", resolved.code, "/courses");
   std::vector<std::string> course_lines;
-  const std::set<std::string> course_urls = ExtractDepartmentCourseUrls(*program_scrape_or);
-  for (const std::string &url : course_urls) {
-    absl::StatusOr<std::string> course_scrape_or = scraper.scrapeFromUrl(url);
-    if (!course_scrape_or.ok()) {
-      continue;
-    }
-    const std::string line = JsonLineFromPayload(*course_scrape_or);
+  absl::StatusOr<std::string> courses_scrape_or =
+      scraper.scrapeFromUrl(courses_url);
+  if (courses_scrape_or.ok()) {
+    const std::string line = JsonLineFromPayload(*courses_scrape_or);
     if (!line.empty()) {
       course_lines.push_back(line);
     }
+  } else {
+    std::cerr << "  warn: courses scrape failed for " << courses_url << ": "
+              << courses_scrape_or.status() << '\n';
   }
   const fs::path courses_jsonl = working_dir / "department_courses.jsonl";
   if (!course_lines.empty()) {
@@ -333,25 +505,31 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // Step 5: embed + push to Weaviate, stamping every chunk with the
+  // user-provided major_key so retrieval can filter on it later.
   GeminiEmbedding embedding;
   weaviateClient weaviate;
-  write_status =
-      EmbedAndPushFile(program_jsonl, major_key, resolved_program_name, embedding, weaviate);
+  write_status = EmbedAndPushFile(program_jsonl, major_key, resolved.label,
+                                  embedding, weaviate);
   if (!write_status.ok()) {
-    std::cerr << "Failed to ingest program requirements: " << write_status << '\n';
+    std::cerr << "Failed to ingest program requirements: " << write_status
+              << '\n';
     return 1;
   }
   if (!course_lines.empty()) {
-    write_status = EmbedAndPushFile(courses_jsonl, major_key, resolved_program_name,
+    write_status = EmbedAndPushFile(courses_jsonl, major_key, resolved.label,
                                     embedding, weaviate);
     if (!write_status.ok()) {
-      std::cerr << "Failed to ingest department course listings: " << write_status
-                << '\n';
+      std::cerr << "Failed to ingest department course listings: "
+                << write_status << '\n';
       return 1;
     }
   }
 
   std::cout << "Ingestion complete for major '" << major_name
-            << "' mapped to '" << resolved_program_name << "'.\n";
+            << "' mapped to department '" << resolved.label
+            << "' (" << resolved.code << "), "
+            << program_lines.size() << " program(s) and "
+            << course_lines.size() << " course-page(s) written.\n";
   return 0;
 }
