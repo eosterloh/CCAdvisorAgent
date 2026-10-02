@@ -240,6 +240,35 @@ target_link_libraries(expansion_tests_runner PRIVATE
   nlohmann_json::nlohmann_json
 )
 
+add_executable(
+  e2e_chat_runner
+  tests/e2e_chat_runner.cc
+  src/app/conversation/chat_management.cc
+  src/app/toolcalling/scraper_tool.cc
+  src/app/toolcalling/retrieve_from_weaviate.cc
+  src/app/toolcalling/coi_email.cc
+  src/app/toolcalling/advisor_escalate.cc
+  src/app/plan/plan_artifacts.cc
+  src/app/geminiclient/gemini_generation.cc
+  src/app/geminiclient/gemini_requests.cc
+  src/app/geminiclient/gemini_embedding.cc
+  src/app/weaviate/weaviate_port.cc
+  src/app/weaviate/reranker.cc
+)
+
+target_include_directories(e2e_chat_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+target_link_libraries(e2e_chat_runner PRIVATE
+  absl::log
+  absl::strings
+  absl::status
+  absl::statusor
+  absl::flat_hash_map
+  absl::time
+  cpr::cpr
+  nlohmann_json::nlohmann_json
+)
+
 if (EXISTS "${CMAKE_SOURCE_DIR}/concurency.cc")
   add_executable(
     concurrency_practice

@@ -1577,9 +1577,9 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
       return curstatus;
     }
     std::string decider_result = g.getContent();
-    bool done = parseDeciderDecision(decider_result) || shouldFinalizePlan(curquery);
-    if (shouldFinalizePlan(curquery)) {
-      done = true;
+    bool done = shouldFinalizePlan(curquery);
+    if (!test_mode) {
+      done = done || parseDeciderDecision(decider_result);
     }
     addTraceEvent("decider",
                   done ? "Decider marked workflow complete."
