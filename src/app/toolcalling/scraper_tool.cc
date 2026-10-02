@@ -60,3 +60,6 @@ absl::StatusOr<std::string> Scraper::scrapeFromUrl(std::string_view url) {
     return r.text;
   }
 }
+
+std::string Scraper::getToolDescription() { return ScraperDescription; }
+

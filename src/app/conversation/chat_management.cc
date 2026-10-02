@@ -4,6 +4,9 @@
 #include "absl/strings/str_cat.h"
 #include "app/common/types.hpp"
 #include "app/geminiclient/gemini_generation.hpp"
+#include "app/plan/plan_artifacts.hpp"
+#include "app/toolcalling/advisor_escalate.hpp"
+#include "app/toolcalling/coi_email.hpp"
 #include "app/toolcalling/retrieve_from_weaviate.hpp"
 #include "app/toolcalling/scraper_tool.hpp"
 #include <algorithm>
@@ -23,7 +26,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr int kMaxToolcalls = 10;
 constexpr std::chrono::milliseconds kMaxLatencyDelay =
-    std::chrono::milliseconds(5000);
+    std::chrono::milliseconds(60000);
 constexpr double kToolCallThreshold = .6;
 
 bool containsAnyNeedle(std::string_view haystack,
@@ -55,24 +58,57 @@ bool shouldForceRetrievalTool(std::string query) {
   return containsAnyNeedle(query, retrieval_needles);
 }
 
-void ensureRetrieveToolPlanned(const std::vector<Tool> &available_tools,
-                               std::vector<Tool> *tools_to_use,
-                               std::vector<std::string> *justifications) {
+bool shouldForceCoiTool(std::string query) {
+  absl::AsciiStrToLower(&query);
+  const std::vector<std::string> needles = {
+      "consent of instructor", "draft an email", "draft a coi",
+      "coi email", "one prerequisite away", "missing one prerequisite"};
+  return containsAnyNeedle(query, needles);
+}
+
+bool shouldForceEscalateTool(std::string query) {
+  absl::AsciiStrToLower(&query);
+  const std::vector<std::string> needles = {
+      "out of scope", "too complex for the agent", "advisor calendar",
+      "schedule with my advisor", "sign up on the calendar",
+      "talk to a human advisor"};
+  return containsAnyNeedle(query, needles);
+}
+
+bool shouldFinalizePlan(std::string query) {
+  absl::AsciiStrToLower(&query);
+  const std::vector<std::string> needles = {
+      "finalize my academic plan", "write my academic plan",
+      "generate my plan", "i'm done planning", "please finalize"};
+  return containsAnyNeedle(query, needles);
+}
+
+void ensureNamedToolPlanned(const std::string &tool_name, const std::string &reason,
+                            const std::vector<Tool> &available_tools,
+                            std::vector<Tool> *tools_to_use,
+                            std::vector<std::string> *justifications) {
   for (const Tool &already_selected : *tools_to_use) {
-    if (already_selected.getToolName() == "retrieve_from_weaviate") {
+    if (already_selected.getToolName() == tool_name) {
       return;
     }
   }
   for (const Tool &available : available_tools) {
-    if (available.getToolName() == "retrieve_from_weaviate") {
+    if (available.getToolName() == tool_name) {
       tools_to_use->push_back(
           Tool(available.getToolName(), available.getToolDescription()));
-      justifications->push_back(
-          "Query appears catalog-grounded; force retrieval for stronger "
-          "evidence.");
+      justifications->push_back(reason);
       return;
     }
   }
+}
+
+void ensureRetrieveToolPlanned(const std::vector<Tool> &available_tools,
+                               std::vector<Tool> *tools_to_use,
+                               std::vector<std::string> *justifications) {
+  ensureNamedToolPlanned(
+      "retrieve_from_weaviate",
+      "Query appears catalog-grounded; force retrieval for stronger evidence.",
+      available_tools, tools_to_use, justifications);
 }
 
 std::string makeResponderAnswerActionable(std::string answer) {
@@ -521,12 +557,7 @@ bool parseDeciderDecision(std::string conent) {
 }
 
 absl::Status makePlanAsPdf(GeminiGenerator &g, std::string convo_s,
-                           std::string convo_l) {
-  std::ofstream plan("plan.md");
-  if (!plan.is_open()) {
-    return absl::InternalError("Failed to open plan.md for writing.");
-  }
-
+                           std::string convo_l, std::string user_profile) {
   const std::string prompt = absl::StrCat(
       "Write a finalized academic advising plan as valid markdown.\n"
       "Preserve markdown structure and include these exact sections:\n"
@@ -537,8 +568,9 @@ absl::Status makePlanAsPdf(GeminiGenerator &g, std::string convo_s,
       "## Next Actions\n"
       "Use concise bullets where appropriate.\n"
       "Do not wrap output in code fences.\n\n"
-      "Short-term conversation memory:\n",
-      convo_s, "\n\nLong-term conversation memory:\n", convo_l);
+      "Student profile:\n",
+      user_profile, "\n\nShort-term conversation memory:\n", convo_s,
+      "\n\nLong-term conversation memory:\n", convo_l);
 
   const absl::Status status = g.geminiGen(prompt, "lightweight");
   if (!status.ok()) {
@@ -546,32 +578,96 @@ absl::Status makePlanAsPdf(GeminiGenerator &g, std::string convo_s,
   }
 
   std::string markdown = extractJsonText(g.getContent());
-  if (markdown.empty()) {
-    markdown = "# Academic Plan\n\n"
-               "## Student Profile\n"
-               "- Unable to auto-generate profile summary.\n\n"
-               "## Recommended Course Path\n"
-               "- Unable to auto-generate recommendations.\n\n"
-               "## Risks and Open Questions\n"
-               "- Generation output was empty.\n\n"
-               "## Next Actions\n"
-               "- Re-run planning with more context.\n";
+  absl::StatusOr<std::string> ensured = EnsureAcademicPlanMarkdown(markdown);
+  if (!ensured.ok()) {
+    return ensured.status();
   }
+  markdown = *ensured;
 
-  // Write line-by-line so Markdown layout is preserved exactly.
-  std::istringstream in(markdown);
-  std::string line;
-  while (std::getline(in, line)) {
-    plan << line << '\n';
+  const absl::Status md_status = WriteAcademicPlanMarkdown(markdown, "plan.md");
+  if (!md_status.ok()) {
+    return md_status;
   }
-  plan.close();
-  return absl::OkStatus();
+  return WriteSimplePdf(markdown, "plan.pdf");
 }
 
 } // namespace
 
 chat_manager::chat_manager() {}
 void chat_manager::clearTraceEvents() { trace_events.clear(); }
+void chat_manager::registerDefaultTools() {
+  if (!availible_tools.empty()) {
+    return;
+  }
+  availible_tools.push_back(
+      Tool("scraper", "Fetches up-to-date page content from a URL."));
+  availible_tools.push_back(
+      Tool("retrieve_from_weaviate",
+           "Retrieves relevant catalog/advising chunks from Weaviate."));
+  availible_tools.push_back(Tool(
+      "draft_coi_email",
+      "Drafts a Consent of Instructor email when the student is one "
+      "prerequisite away from a target course."));
+  availible_tools.push_back(Tool(
+      "escalate_to_advisor",
+      "Escalates out-of-scope or overly complex questions to a human advisor "
+      "calendar signup."));
+}
+
+void chat_manager::prefetchMajorCatalog(std::ostream &o) {
+  if (u_major_key.empty() || u_major_key == "none" ||
+      u_major_key == "unspecified") {
+    return;
+  }
+  const std::string query = absl::StrCat(
+      "core requirements, electives, and prerequisites for ", u_major);
+  const std::chrono::steady_clock::time_point started =
+      std::chrono::steady_clock::now();
+  absl::StatusOr<std::string> retrieved_or =
+      retrieveFromWeaviate(query, u_major_key, major_ingest_status_file);
+  const std::chrono::milliseconds latency =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - started);
+  if (!retrieved_or.ok()) {
+    addTraceEvent("major_prefetch",
+                  absl::StrCat("Major catalog prefetch failed: ",
+                               retrieved_or.status().ToString()),
+                  false, 0, latency, std::optional<std::string>("retrieve_from_weaviate"));
+    o << "Continuing without prefetched catalog context.\n";
+    return;
+  }
+  major_prefetch_context = *retrieved_or;
+  addTraceEvent("major_prefetch", "Prefetched major-relevant catalog chunks.",
+                true, 0, latency,
+                std::optional<std::string>("retrieve_from_weaviate"),
+                std::optional<std::string>(major_prefetch_context));
+}
+
+void chat_manager::runAmbiguityIntake(std::istream &i, std::ostream &o) {
+  o << "\nPhase 2: a few questions to remove remaining ambiguity.\n";
+  auto ask = [&](const std::string &prompt) -> std::string {
+    o << prompt;
+    std::string answer;
+    if (!std::getline(i, answer) || answer.empty()) {
+      return "unspecified";
+    }
+    return answer;
+  };
+  const std::string abroad = ask("Do you plan to study abroad? ");
+  const std::string commitments =
+      ask("Athletics, work, or other time commitments? ");
+  const std::string after_cc =
+      ask("After CC, are you aiming for industry, grad school, or undecided? ");
+  const std::string extra = absl::StrCat(
+      "- Study abroad: ", abroad, "\n", "- Time commitments: ", commitments,
+      "\n", "- After CC: ", after_cc, "\n");
+  user_info = absl::StrCat(user_info, extra);
+  convo_longterm_history = absl::StrCat(convo_longterm_history, extra);
+  convo_shortterm_history = absl::StrCat(convo_shortterm_history, extra);
+  addTraceEvent("ambiguity_intake", "Collected study-abroad and career constraints.",
+                true, 0, std::chrono::milliseconds(0),
+                std::optional<std::string>());
+}
 void chat_manager::launchMajorIngestionInBackground(std::ostream &o) {
   if (u_major_key.empty() || u_major_key == "none" || u_major_key == "unspecified") {
     return;
@@ -624,7 +720,9 @@ void chat_manager::addTraceEvent(const std::string &phase,
   trace_events.push_back(event);
 }
 void chat_manager::loadTestProfilePreset() {
+  test_mode = true;
   u_advisor = "JaneDoe";
+  u_student_name = "Erick O";
   u_major = "Computer Science";
   u_major_key = normalizeMajorKey(u_major);
   u_minor = "none";
@@ -656,14 +754,7 @@ void chat_manager::loadTestProfilePreset() {
   convo_longterm_history = user_info;
   convo_shortterm_history = user_info;
   curquery.clear();
-
-  if (availible_tools.empty()) {
-    availible_tools.push_back(
-        Tool("scraper", "Fetches up-to-date page content from a URL."));
-    availible_tools.push_back(
-        Tool("retrieve_from_weaviate",
-             "Retrieves relevant catalog/advising chunks from Weaviate."));
-  }
+  registerDefaultTools();
 }
 std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   if (!user_info.empty()) {
@@ -682,6 +773,7 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   };
 
   const std::string student_name = ask("Student name/preferred name: ");
+  u_student_name = student_name;
   const std::string class_year = ask("Class year (e.g. 2027): ");
   u_advisor = ask("Assigned advisor name/email: ");
   u_major = ask("Declared/intended major: ");
@@ -811,13 +903,9 @@ std::string chat_manager::getUserInfo(std::istream &i, std::ostream &o) {
   convo_longterm_history = user_info;
   convo_shortterm_history = user_info;
   curquery.clear();
-
-  if (availible_tools.empty()) {
-    availible_tools.push_back(
-        Tool("scraper", "Fetches up-to-date page content from a URL."));
-    availible_tools.push_back(
-        Tool("retrieve_from_weaviate",
-             "Retrieves relevant catalog/advising chunks from Weaviate."));
+  registerDefaultTools();
+  if (!test_mode) {
+    runAmbiguityIntake(i, o);
   }
 
   o << "\nProfile captured. Starting advising chat.\n";
@@ -835,6 +923,10 @@ std::string chat_manager::plannerPrompt() {
       "- If the user asks for catalog evidence, official course descriptions, "
       "prerequisite grounding, or Weaviate retrieval, set tool_calling_necessity "
       "to at least 0.9 and include retrieve_from_weaviate.\n"
+      "- If the user is one prerequisite short and needs Consent of Instructor, "
+      "include draft_coi_email.\n"
+      "- If the question is out of scope or too complex, include "
+      "escalate_to_advisor.\n"
       "- Use scraper only when a specific URL is explicitly needed.\n"
       "Available tools:\n";
 
@@ -927,6 +1019,10 @@ std::string chat_manager::responderPrompt(std::string curquery) {
       "User profile:\n",
       user_info, "\n\nShort-term memory:\n", convo_shortterm_history,
       "\n\nLong-term memory:\n", convo_longterm_history,
+      "\n\nPrefetched major catalog context:\n",
+      major_prefetch_context.empty() ? "(none)" : major_prefetch_context,
+      "\n\nTool evidence from this turn:\n",
+      last_tool_evidence.empty() ? "(none)" : last_tool_evidence,
       "\n\nCurrent user query:\n", curquery);
 }
 
@@ -978,7 +1074,9 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
   // latency or retry threshold.
   GeminiGenerator g;
   getUserInfo(i, o);
+  registerDefaultTools();
   clearTraceEvents();
+  prefetchMajorCatalog(o);
   absl::Status curstatus = absl::OkStatus();
   int query_number = 0;
   // Add logs for each of these steps
@@ -998,6 +1096,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                     std::optional<std::string>());
       continue;
     }
+    last_tool_evidence.clear();
     std::string curconversation = "";
     ++query_number;
     curconversation =
@@ -1033,6 +1132,20 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     if (shouldForceRetrievalTool(curquery)) {
       ensureRetrieveToolPlanned(availible_tools, &tools_to_use,
                                 &explaination_for_use);
+      tool_calling_threshold = 1.0;
+    }
+    if (shouldForceCoiTool(curquery)) {
+      ensureNamedToolPlanned(
+          "draft_coi_email",
+          "Student appears one prerequisite away; draft a COI email.",
+          availible_tools, &tools_to_use, &explaination_for_use);
+      tool_calling_threshold = 1.0;
+    }
+    if (shouldForceEscalateTool(curquery)) {
+      ensureNamedToolPlanned(
+          "escalate_to_advisor",
+          "Question is out of scope; escalate to advisor calendar.",
+          availible_tools, &tools_to_use, &explaination_for_use);
       tool_calling_threshold = 1.0;
     }
     const long long thinkingtime_ms = thinkingtime.count();
@@ -1100,17 +1213,35 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                            "ms (limit ", kMaxLatencyDelay.count(), "ms)\n");
         }
         std::vector<Tool> order = parseOrchResultForTools(g.getContent());
-        if (order.empty() && shouldForceRetrievalTool(curquery)) {
-          Tool fallback("retrieve_from_weaviate",
-                        "Retrieves relevant catalog/advising chunks from "
-                        "Weaviate.");
-          json fallback_args;
-          fallback_args["query"] = curquery;
-          fallback.setInvocation(
-              fallback_args,
-              "Orchestrator returned no tool calls; injecting retrieval for "
-              "catalog-grounded query.");
+        auto inject_if_missing = [&](const std::string &name, json args,
+                                     const std::string &reason) {
+          for (const Tool &existing : order) {
+            if (existing.getToolName() == name) {
+              return;
+            }
+          }
+          Tool fallback(name, name);
+          fallback.setInvocation(std::move(args), reason);
           order.push_back(std::move(fallback));
+        };
+        if (shouldForceRetrievalTool(curquery)) {
+          json args;
+          args["query"] = curquery;
+          inject_if_missing("retrieve_from_weaviate", args,
+                            "Injecting retrieval for catalog-grounded query.");
+        }
+        if (shouldForceCoiTool(curquery)) {
+          json args;
+          args["course"] = "Topics in Computer Science: Applied AI";
+          args["missing_prerequisite"] = "one listed prerequisite";
+          inject_if_missing("draft_coi_email", args,
+                            "Injecting COI email draft.");
+        }
+        if (shouldForceEscalateTool(curquery)) {
+          json args;
+          args["reason"] = curquery;
+          inject_if_missing("escalate_to_advisor", args,
+                            "Injecting advisor calendar escalation.");
         }
         std::vector<ToolCallingLogs> logs;
         for (Tool &tool : order) {
@@ -1128,7 +1259,9 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           const std::chrono::steady_clock::time_point started =
               std::chrono::steady_clock::now();
 
-          if (!tool.hasInvocation()) {
+          if (!tool.hasInvocation() &&
+              tool.getToolName() != "draft_coi_email" &&
+              tool.getToolName() != "escalate_to_advisor") {
             log_entry.summary = "Skipped: missing invocation payload.";
             const std::chrono::steady_clock::time_point ended =
                 std::chrono::steady_clock::now();
@@ -1176,11 +1309,47 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                     "Weaviate retrieval + rerank succeeded. Output size=",
                     retrieval_or->size(), " chars.");
                 tool_evidence = *retrieval_or;
+                last_tool_evidence =
+                    absl::StrCat(last_tool_evidence, *retrieval_or, "\n");
               } else {
                 log_entry.summary = absl::StrCat("Weaviate retrieval failed: ",
                                                  retrieval_or.status());
               }
             }
+          } else if (tool.getToolName() == "draft_coi_email") {
+            const std::string course =
+                args.contains("course") && args.at("course").is_string()
+                    ? args.at("course").get<std::string>()
+                    : "the requested course";
+            const std::string missing =
+                args.contains("missing_prerequisite") &&
+                        args.at("missing_prerequisite").is_string()
+                    ? args.at("missing_prerequisite").get<std::string>()
+                    : "one listed prerequisite";
+            const std::string extra =
+                args.contains("context") && args.at("context").is_string()
+                    ? args.at("context").get<std::string>()
+                    : curquery;
+            const std::string email = DraftCoiEmail(
+                u_advisor, u_student_name, course, missing, extra);
+            log_entry.success = true;
+            log_entry.summary =
+                absl::StrCat("Drafted COI email. Size=", email.size(), " chars.");
+            tool_evidence = email;
+            last_tool_evidence = absl::StrCat(last_tool_evidence, email, "\n");
+            o << email << "\n";
+          } else if (tool.getToolName() == "escalate_to_advisor") {
+            const std::string reason =
+                args.contains("reason") && args.at("reason").is_string()
+                    ? args.at("reason").get<std::string>()
+                    : curquery;
+            const std::string note =
+                BuildAdvisorEscalation(u_advisor, reason);
+            log_entry.success = true;
+            log_entry.summary = "Created advisor calendar escalation note.";
+            tool_evidence = note;
+            last_tool_evidence = absl::StrCat(last_tool_evidence, note, "\n");
+            o << note << "\n";
           } else {
             log_entry.summary = absl::StrCat("Skipped: unknown tool '",
                                              tool.getToolName(), "'.");
@@ -1408,7 +1577,10 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
       return curstatus;
     }
     std::string decider_result = g.getContent();
-    bool done = parseDeciderDecision(decider_result);
+    bool done = parseDeciderDecision(decider_result) || shouldFinalizePlan(curquery);
+    if (shouldFinalizePlan(curquery)) {
+      done = true;
+    }
     addTraceEvent("decider",
                   done ? "Decider marked workflow complete."
                        : "Decider requested another round.",
@@ -1416,22 +1588,20 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                   std::optional<std::string>());
 
     if (done) {
-      curstatus =
-          makePlanAsPdf(g, convo_shortterm_history, convo_longterm_history);
+      curstatus = makePlanAsPdf(g, convo_shortterm_history,
+                                convo_longterm_history, user_info);
       addTraceEvent("plan_generation",
-                    curstatus.ok() ? "Generated final plan markdown."
-                                   : "Failed to generate final plan markdown.",
+                    curstatus.ok()
+                        ? "Generated final plan markdown and PDF."
+                        : "Failed to generate final plan artifacts.",
                     curstatus.ok(), query_number, std::chrono::milliseconds(0),
                     std::optional<std::string>());
       if (!curstatus.ok()) {
         return curstatus;
       }
+      o << "Wrote plan.md and plan.pdf.\n";
       break;
     }
   }
   return absl::OkStatus();
-  // end condition: When we finalize the plan for the user
 }
-
-// What I am missing:
-// Need to pull data from weaviate

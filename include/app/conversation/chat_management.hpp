@@ -4,6 +4,7 @@
 #include "../toolcalling/tools.hpp"
 #include "absl/status/status.h"
 #include "app/common/types.hpp"
+#include <istream>
 #include <optional>
 #include <ostream>
 #include <vector>
@@ -18,9 +19,16 @@ private:
   std::string u_major;
   std::string u_major_key;
   std::string u_minor;
+  std::string u_student_name;
   std::string major_ingest_status_file;
   std::string curquery;
+  std::string major_prefetch_context;
+  std::string last_tool_evidence;
+  bool test_mode = false;
+  void registerDefaultTools();
   void launchMajorIngestionInBackground(std::ostream &o);
+  void prefetchMajorCatalog(std::ostream &o);
+  void runAmbiguityIntake(std::istream &i, std::ostream &o);
   std::string getUserInfo(std::istream &i, std::ostream &o);
   std::string plannerPrompt();
   std::string orchPrompt(std::vector<Tool> tools,
@@ -46,6 +54,7 @@ public:
     return trace_events;
   };
   void clearTraceEvents();
+  void addTestTraceEvent(const TraceEvent &event) { trace_events.push_back(event); }
 };
 
 #endif

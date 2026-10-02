@@ -17,6 +17,6 @@
 
 ## Planned evolution
 
-- Move from `main.cc` orchestration to a dedicated test runner.
-- Split integration tests from unit tests.
-- Add stable fixtures and deterministic mocks for external API calls.
+- Dedicated runners: `expansion_tests_runner`, `weaviate_tests_runner`, `evals_runner`.
+- Deterministic scoring in `evals/scoring.cc` and reporting in `evals/reporting.cc`.
+- Live Gemini/Jina still used for integration evals; unit scoring tests do not call external APIs.

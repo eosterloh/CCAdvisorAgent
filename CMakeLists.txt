@@ -63,6 +63,9 @@ add_executable(
   src/app/geminiclient/gemini_embedding.cc
   src/app/weaviate/weaviate_port.cc
   src/app/weaviate/reranker.cc
+  src/app/toolcalling/coi_email.cc
+  src/app/toolcalling/advisor_escalate.cc
+  src/app/plan/plan_artifacts.cc
 )
 
 target_include_directories(AdvisorAgBuild PRIVATE ${CMAKE_SOURCE_DIR}/include)
@@ -94,6 +97,7 @@ target_link_libraries(scraper_script PRIVATE
   absl::status
   absl::statusor
   cpr::cpr
+  nlohmann_json::nlohmann_json
 )
 
 add_executable(
@@ -159,9 +163,14 @@ add_executable(
   evals_runner
   evals/evals_main.cc
   evals/evalsuite.cc
+  evals/scoring.cc
+  evals/reporting.cc
   src/app/conversation/chat_management.cc
   src/app/toolcalling/scraper_tool.cc
   src/app/toolcalling/retrieve_from_weaviate.cc
+  src/app/toolcalling/coi_email.cc
+  src/app/toolcalling/advisor_escalate.cc
+  src/app/plan/plan_artifacts.cc
   src/app/geminiclient/gemini_generation.cc
   src/app/geminiclient/gemini_requests.cc
   src/app/geminiclient/gemini_embedding.cc
@@ -169,9 +178,58 @@ add_executable(
   src/app/weaviate/reranker.cc
 )
 
-target_include_directories(evals_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(evals_runner PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/evals)
 
 target_link_libraries(evals_runner PRIVATE
+  absl::log
+  absl::strings
+  absl::status
+  absl::statusor
+  absl::flat_hash_map
+  absl::time
+  cpr::cpr
+  nlohmann_json::nlohmann_json
+)
+
+add_executable(
+  seed_cs_catalog
+  scripts/seed_cs_catalog.cc
+  src/app/weaviate/weaviate_port.cc
+  src/app/geminiclient/gemini_embedding.cc
+  src/app/geminiclient/gemini_requests.cc
+)
+
+target_include_directories(seed_cs_catalog PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+target_link_libraries(seed_cs_catalog PRIVATE
+  absl::log
+  absl::strings
+  absl::status
+  absl::statusor
+  cpr::cpr
+  nlohmann_json::nlohmann_json
+)
+
+add_executable(
+  expansion_tests_runner
+  tests/expansion_unit_tests.cc
+  evals/scoring.cc
+  src/app/conversation/chat_management.cc
+  src/app/toolcalling/scraper_tool.cc
+  src/app/toolcalling/retrieve_from_weaviate.cc
+  src/app/toolcalling/coi_email.cc
+  src/app/toolcalling/advisor_escalate.cc
+  src/app/plan/plan_artifacts.cc
+  src/app/geminiclient/gemini_generation.cc
+  src/app/geminiclient/gemini_requests.cc
+  src/app/geminiclient/gemini_embedding.cc
+  src/app/weaviate/weaviate_port.cc
+  src/app/weaviate/reranker.cc
+)
+
+target_include_directories(expansion_tests_runner PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/evals)
+
+target_link_libraries(expansion_tests_runner PRIVATE
   absl::log
   absl::strings
   absl::status

@@ -57,5 +57,5 @@ compile_commands.json
 .idea/
 *.log
 
-.cache/
-.cache/*
+evals/eval_results.jsonl
+plan.pdf

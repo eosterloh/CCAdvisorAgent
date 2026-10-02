@@ -14,7 +14,7 @@ public:
   Scraper();
   Scraper(bool json_on);
   absl::StatusOr<std::string> scrapeFromUrl(std::string_view url);
-  std::string getToolDescription(); // implement
+  std::string getToolDescription();
 };
 
 #endif

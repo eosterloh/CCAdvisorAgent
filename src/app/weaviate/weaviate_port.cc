@@ -4,12 +4,14 @@
 #include "app/common/types.hpp"
 #include "app/geminiclient/gemini_embedding.hpp"
 #include <absl/strings/str_cat.h>
+#include <algorithm>
 #include <cpr/cpr.h>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -86,8 +88,58 @@ absl::Status weaviateClient::embed(const EmbeddedRecord &e) {
   }
 }
 
+namespace {
+EmbeddedRecord ParseCourseChunkObject(const json &obj) {
+  EmbeddedRecord record;
+  record.source_path =
+      obj.contains("source_path") && obj["source_path"].is_string()
+          ? obj["source_path"].get<std::string>()
+          : "";
+  record.source_url =
+      obj.contains("source_url") && obj["source_url"].is_string()
+          ? obj["source_url"].get<std::string>()
+          : "";
+  record.major_key =
+      obj.contains("major_key") && obj["major_key"].is_string()
+          ? obj["major_key"].get<std::string>()
+          : "";
+  record.major_name =
+      obj.contains("major_name") && obj["major_name"].is_string()
+          ? obj["major_name"].get<std::string>()
+          : "";
+  if (obj.contains("course_code") && obj["course_code"].is_string()) {
+    record.course_code = obj["course_code"].get<std::string>();
+  } else {
+    record.course_code = std::nullopt;
+  }
+  record.course_title = obj.contains("title") && obj["title"].is_string()
+                            ? obj["title"].get<std::string>()
+                            : "";
+  record.chunk_text =
+      obj.contains("chunk_text") && obj["chunk_text"].is_string()
+          ? obj["chunk_text"].get<std::string>()
+          : "";
+  record.embedding.clear();
+  return record;
+}
+} // namespace
+
 absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string_view query,
                                                         std::string_view major_key) {
+  absl::StatusOr<std::vector<EmbeddedRecord>> many =
+      retrieveMany(query, major_key, 1);
+  if (!many.ok()) {
+    return many.status();
+  }
+  if (many->empty()) {
+    return absl::InternalError("No CourseChunk objects found.");
+  }
+  return many->front();
+}
+
+absl::StatusOr<std::vector<EmbeddedRecord>>
+weaviateClient::retrieveMany(std::string_view query, std::string_view major_key,
+                             int limit) {
   GeminiEmbedding embedder;
   const absl::Status embed_status = embedder.embed(query);
   if (!embed_status.ok()) {
@@ -118,8 +170,8 @@ absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string_view query,
       -> absl::StatusOr<json> {
     const std::string graphql_query = absl::StrCat(
         "{ Get { CourseChunk(nearVector: {vector: [", vector_stream.str(),
-        "]}", where_clause,
-        ", limit: 10) { major_key major_name course_code title source_url "
+        "]}", where_clause, ", limit: ", std::max(1, limit),
+        ") { major_key major_name course_code title source_url "
         "source_path chunk_text _additional { id distance } } } }");
     json payload = {{"query", graphql_query}};
     cpr::Response r = cpr::Post(endpoint, header, cpr::Body{payload.dump()},
@@ -179,42 +231,9 @@ absl::StatusOr<EmbeddedRecord> weaviateClient::retreive(std::string_view query,
     return absl::InternalError("No CourseChunk objects found.");
   }
 
-  const json &obj = response_json["data"]["Get"]["CourseChunk"].at(0);
-  EmbeddedRecord record;
-  record.source_path =
-      obj.contains("source_path") && obj["source_path"].is_string()
-          ? obj["source_path"].get<std::string>()
-          : "";
-
-  record.source_url =
-      obj.contains("source_url") && obj["source_url"].is_string()
-          ? obj["source_url"].get<std::string>()
-          : "";
-  record.major_key =
-      obj.contains("major_key") && obj["major_key"].is_string()
-          ? obj["major_key"].get<std::string>()
-          : "";
-  record.major_name =
-      obj.contains("major_name") && obj["major_name"].is_string()
-          ? obj["major_name"].get<std::string>()
-          : "";
-
-  if (obj.contains("course_code") && obj["course_code"].is_string()) {
-    record.course_code = obj["course_code"].get<std::string>();
-  } else {
-    record.course_code = std::nullopt;
+  std::vector<EmbeddedRecord> records;
+  for (const json &obj : response_json["data"]["Get"]["CourseChunk"]) {
+    records.push_back(ParseCourseChunkObject(obj));
   }
-
-  record.course_title = obj.contains("title") && obj["title"].is_string()
-                            ? obj["title"].get<std::string>()
-                            : "";
-
-  record.chunk_text =
-      obj.contains("chunk_text") && obj["chunk_text"].is_string()
-          ? obj["chunk_text"].get<std::string>()
-          : "";
-
-  record.embedding.clear();
-
-  return record;
+  return records;
 }
