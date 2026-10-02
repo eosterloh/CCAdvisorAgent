@@ -1,33 +1,29 @@
 # Testing
 
-This project currently runs integration-style tests from `main.cc`.
+## Unit and subsystem runners
 
-## Scope (current)
+- `expansion_tests_runner` — COI email, advisor escalation, plan artifacts, scoring helpers (no live APIs required).
+- `weaviate_tests_runner` — Weaviate embed + nearVector retrieve.
+- `AdvisorAgBuild` — Gemini, tool-calling, and Weaviate integration tests, then interactive chat.
 
-- Gemini client tests:
-  - generation request succeeds and returns non-empty content
-  - embedding request succeeds and returns a non-empty vector
-- Tool-calling tests:
-  - scraper request succeeds in JSON mode and includes expected JSON fields
+## Eval suite
 
-These tests target subsystems expected to change little while implementation is completed:
-
-- `src/app/geminiclient/*`
-- `src/app/toolcalling/*`
-
-## Run
-
-From the `build` directory:
+From repository root:
 
 ```bash
-bash chelp.bash
+bash scripts/run_evals.sh
 ```
 
-`main.cc` is currently the test entrypoint and runs all selected tests.
+Writes `evals/eval_results.jsonl` and prints pass rates by tag and metric.
 
 ## Required environment variables
 
 - `GEMINI_API_KEY`
 - `JINA_AI_API_KEY`
 
-If either is missing, relevant tests will fail with an error status.
+Seed Computer Science catalog chunks before retrieval-heavy evals:
+
+```bash
+cmake --build build --target seed_cs_catalog -j
+./build/seed_cs_catalog
+```

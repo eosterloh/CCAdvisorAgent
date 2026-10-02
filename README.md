@@ -6,11 +6,12 @@ produce grounded advising responses.
 
 ## Core Capabilities
 
-- Collects student context through a preliminary onboarding flow.
+- Collects student context through a preliminary onboarding flow (plus optional ambiguity intake).
 - Ingests major-specific catalog data into Weaviate with embeddings.
-- Runs major-aware retrieval with readiness/fallback signaling while ingestion is in progress.
-- Supports tool-based operations (`scrape`, `retrieve_from_weaviate`) plus direct responder flow.
-- Generates memory-updated advising conversations and a final markdown plan artifact.
+- Prefetches major-relevant catalog chunks at chat start.
+- Runs major-aware multi-chunk retrieval with readiness/fallback signaling while ingestion is in progress.
+- Supports tool-based operations (`scrape`, `retrieve_from_weaviate`, `draft_coi_email`, `escalate_to_advisor`) plus direct responder flow.
+- Generates memory-updated advising conversations and final `plan.md` + `plan.pdf` artifacts.
 
 ## Architecture Overview
 
@@ -61,8 +62,12 @@ Primary targets:
 - `AdvisorAgBuild` - main executable (tests + chat sandbox entrypoint)
 - `major_ingest_runner` - major-agnostic scrape/embed/populate pipeline
 - `send_data_to_weaviate` - batch ingest from local JSONL files
+- `seed_cs_catalog` - embeds a small Computer Science grounding set into Weaviate
 - `scraper_script` - scraper utility binary
 - `weaviate_tests_runner` - focused Weaviate integration tests
+- `expansion_tests_runner` - offline COI/escalate/plan/scoring unit tests
+- `e2e_chat_runner` - multi-turn retrieval + COI + escalate + finalize plan
+- `evals_runner` - trace-driven eval suite over `evals/cases.jsonl`
 
 ## Local Weaviate
 

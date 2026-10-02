@@ -17,7 +17,9 @@ public:
   GeminiEmbedding();
   absl::Status embed(std::string_view chunk); // both sends the file to the
                                               // files api and embedds.
-  absl::Status embedFile(std::string_view filepath);
+  absl::Status embedFile(std::string_view filepath,
+                         std::string_view major_key = "",
+                         std::string_view major_name = "");
   absl::StatusOr<EmbeddedRecord> getContent();
   absl::Status clean();
 };

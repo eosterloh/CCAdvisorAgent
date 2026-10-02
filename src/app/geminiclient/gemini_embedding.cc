@@ -113,7 +113,9 @@ absl::Status GeminiEmbedding::embed(std::string_view chunk) {
   return absl::OkStatus();
 }
 
-absl::Status GeminiEmbedding::embedFile(std::string_view filepath) {
+absl::Status GeminiEmbedding::embedFile(std::string_view filepath,
+                                        std::string_view major_key,
+                                        std::string_view major_name) {
   std::ifstream f{std::string(filepath)};
   if (!f.is_open()) {
     return absl::InternalError("Error opening file");
@@ -202,8 +204,8 @@ absl::Status GeminiEmbedding::embedFile(std::string_view filepath) {
     EmbeddedRecord record;
     record.source_path = filepath;
     record.source_url = source_text;
-    record.major_key = "";
-    record.major_name = "";
+    record.major_key = std::string(major_key);
+    record.major_name = std::string(major_name);
     if (is_course_file) {
       std::optional<std::string> code =
           ExtractCourseCodeFromContent(content_text);

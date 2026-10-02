@@ -4,6 +4,7 @@
 #include "app/weaviate/weaviate_port.hpp"
 #include "nlohmann/json.hpp"
 #include <fstream>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -36,40 +37,44 @@ retrieveFromWeaviate(std::string_view query, std::string_view major_key,
   }
 
   weaviateClient client;
-  absl::StatusOr<EmbeddedRecord> retrieved_or = client.retreive(query, major_key);
+  absl::StatusOr<std::vector<EmbeddedRecord>> retrieved_or =
+      client.retrieveMany(query, major_key, 8);
   if (!retrieved_or.ok()) {
     return retrieved_or.status();
   }
 
-  const std::string candidate_text = absl::StrCat(
-      "course_code: ",
-      retrieved_or->course_code.has_value() ? *retrieved_or->course_code : "",
-      "\n", "title: ", retrieved_or->course_title, "\n",
-      "source_url: ", retrieved_or->source_url, "\n",
-      "source_path: ", retrieved_or->source_path, "\n",
-      "chunk_text: ", retrieved_or->chunk_text);
+  json evidence = json::array();
+  std::string flattened;
+  for (const EmbeddedRecord &record : *retrieved_or) {
+    const std::string candidate_text = absl::StrCat(
+        "course_code: ",
+        record.course_code.has_value() ? *record.course_code : "", "\n",
+        "title: ", record.course_title, "\n",
+        "source_url: ", record.source_url, "\n",
+        "source_path: ", record.source_path, "\n",
+        "chunk_text: ", record.chunk_text, "\n---\n");
+    flattened = absl::StrCat(flattened, candidate_text);
+    evidence.push_back(
+        json{{"source_url", record.source_url},
+             {"source_path", record.source_path},
+             {"course_code",
+              record.course_code.has_value() ? *record.course_code : ""},
+             {"title", record.course_title},
+             {"chunk_text", record.chunk_text}});
+  }
 
   Reranker reranker;
-  absl::StatusOr<std::string> reranked_or =
-      reranker.rerank(candidate_text, query);
+  absl::StatusOr<std::string> reranked_or = reranker.rerank(flattened, query);
 
   json result;
   result["query"] = query;
   result["major_key"] = major_key;
-  result["flattened_text"] = candidate_text;
+  result["flattened_text"] = flattened;
   result["ingestion_state"] = "ready";
-  result["evidence"] = json::array(
-      {json{{"source_url", retrieved_or->source_url},
-            {"source_path", retrieved_or->source_path},
-            {"course_code", retrieved_or->course_code.has_value()
-                                ? *retrieved_or->course_code
-                                : ""},
-            {"title", retrieved_or->course_title},
-            {"chunk_text", retrieved_or->chunk_text}}});
+  result["evidence"] = evidence;
   if (reranked_or.ok()) {
     result["reranked_summary"] = *reranked_or;
   } else {
-    // Keep retrieval grounded and structured even if reranker fails.
     result["reranked_summary"] = "";
     result["reranker_error"] = reranked_or.status().ToString();
   }

@@ -6,33 +6,52 @@
 *   **Advisor:** JaneDoe
 *   **Major:** Computer Science
 *   **Major Description:** Computer Science with applied AI and systems interests.
-*   **Completed Courses:** Applied Python, CS2, Data Structures and Algorithms, Computer Organization, Software Design.
-*   **Currently Enrolled:** Theory of Computation.
-*   **Desired Courses:** Topics in Computer Science: Applied AI.
-*   **Interests:** Applied AI, systems.
-*   **Constraints:** Balanced workload, minimize prerequisite risk.
-*   **Goal:** Build an AI-focused upper-division plan.
+*   **Minor:** None
+*   **Completed Courses:**
+    *   Applied Python
+    *   CS2
+    *   Data Structures and Algorithms
+    *   Computer Organization
+    *   Software Design
+*   **Current Course:**
+    *   Theory of Computation
+*   **Desired Courses:**
+    *   Topics in Computer Science: Applied AI
+*   **Interests:** Applied AI, systems
+*   **Constraints:** Balanced workload
+*   **Goal:** Build an AI-focused upper-division plan
 
 ## Recommended Course Path
-For the upcoming semester, the following plan is proposed to advance Erick's AI interests while maintaining a balanced workload and managing prerequisite risks:
+This recommended path is designed to build upon Erick's completed coursework, align with his AI and systems interests, and help achieve his goal of an AI-focused upper-division plan while maintaining a balanced workload.
 
-*   **Topics in Computer Science: Applied AI**: Directly aligns with Erick's primary interest in AI depth. This course is central to his desired focus.
-*   **CS XXX: Design and Analysis of Algorithms**: A foundational computer science course building upon Data Structures. It is essential for advanced CS topics, including many areas within AI, and often a prerequisite for further specialized courses.
-*   **MATH XXX: Introduction to Probability and Statistics**: Provides the critical mathematical foundation necessary for understanding and working with modern AI and Machine Learning concepts. This course offers a different type of intellectual challenge, balancing the workload compared to multiple heavy programming courses.
-*   **[Non-CS Elective/General Education Course]**: To ensure a balanced and manageable academic workload, allowing for sufficient time to delve into the demanding technical courses.
-
-**Alternatives & Tradeoffs:**
-*   If *Introduction to Probability and Statistics* feels too introductory or Erick has strong prior knowledge, **CS XXX: Database Systems** could be considered as an alternative for a more practical and applied CS course, complementing his systems interest without being overly intense.
-*   If the combination of *Applied AI* and *Algorithms* proves too demanding, *Algorithms* could be deferred to a later semester in favor of a lighter CS elective or an introductory course touching on systems (e.g., a web development or scripting course, if available at an appropriate level). However, *Algorithms* is highly recommended for foundational AI depth.
+*   **Year 3, Fall Semester (Approx. 12-15 credits):**
+    *   **Machine Learning (Core AI):** Foundation in algorithms for learning from data.
+    *   **Operating Systems (Core Systems):** Builds on Computer Organization, essential for understanding system architecture.
+    *   **Probability and Statistics for Computer Science:** Critical mathematical foundation for advanced AI and data analysis.
+*   **Year 3, Spring Semester (Approx. 12-15 credits):**
+    *   **Topics in Computer Science: Applied AI (Student Desired):** Direct focus on practical AI applications.
+    *   **Database Systems:** Practical systems course, crucial for managing data often used in AI applications.
+    *   **Linear Algebra:** Another fundamental mathematical course, vital for understanding many AI algorithms, particularly deep learning.
+*   **Year 4, Fall Semester (Approx. 12-15 credits):**
+    *   **Deep Learning (Advanced AI):** Focus on neural networks and their applications.
+    *   **Distributed Systems / Computer Networks (Advanced Systems):** Understanding networked and distributed computation for large-scale AI.
+    *   **Computer Vision / Natural Language Processing (AI Elective):** Specialization in a key AI domain.
+*   **Year 4, Spring Semester (Approx. 12-15 credits):**
+    *   **Senior Capstone Project (AI/Systems Focus):** Integration of knowledge in a culminating project.
+    *   **AI Ethics and Society / Advanced Algorithms:** Exploration of societal impact or deeper algorithmic complexity.
+    *   **Elective (e.g., Cloud Computing, Robotics, Human-Computer Interaction):** Further specialization or breadth.
 
 ## Risks and Open Questions
-*   **Prerequisite Verification:** The most significant risk is ensuring Erick meets all prerequisites for *Topics in Computer Science: Applied AI* and *Design and Analysis of Algorithms*. 'Topics' courses can sometimes have advanced or specific requirements.
-*   **Workload Management:** While designed for balance, the combination of *Applied AI* and *Algorithms* can be demanding. Close monitoring of workload and time commitment will be essential.
-*   **Systems Interest Integration:** This plan prioritizes AI and foundational CS/Math. Erick's "systems interest" is not directly addressed this semester, but foundational courses like Algorithms will support it. Future planning should explicitly incorporate systems courses.
-*   **Long-Term AI Curriculum:** How does 'Topics in Computer Science: Applied AI' fit into a broader, multi-semester AI curriculum? Are there specific follow-up courses or specializations it prepares him for?
+*   **Balanced Workload:** The proposed path includes rigorous courses; careful monitoring of workload and time management will be crucial.
+*   **Course Availability:** "Topics in Computer Science: Applied AI" may be an irregularly offered course. Contingency plans for alternative AI electives may be needed.
+*   **Prerequisite Verification:** All recommended courses' prerequisites must be officially confirmed and met.
+*   **Specific Sub-fields of AI:** Erick's interest in "applied AI" could branch into many areas (e.g., robotics, vision, NLP). Further discussion could refine elective choices.
+*   **Career/Graduate School Alignment:** Discussion on post-graduation plans (industry vs. graduate school) could influence the emphasis on research or specific advanced topics.
+*   **Breadth Requirements:** This plan focuses on major-specific courses; ensure all general education or university breadth requirements are accounted for.
 
 ## Next Actions
-*   Erick to review this proposed plan and provide initial feedback on course interests and perceived workload.
-*   Immediately verify specific course numbers and prerequisites for *Topics in Computer Science: Applied AI* and *Design and Analysis of Algorithms*.
-*   Research available options for *MATH XXX: Introduction to Probability and Statistics* and the *Non-CS Elective/General Education Course*.
-*   Schedule a follow-up meeting to finalize course selections and discuss the long-term plan for integrating systems-focused courses in subsequent semesters.
+*   **Schedule a follow-up meeting:** Discuss this detailed plan, addressing any questions or concerns.
+*   **Verify Course Prerequisites:** Confirm Erick meets all prerequisites for the recommended courses for Year 3, Fall.
+*   **Explore Course Catalog:** Review course descriptions for upcoming semesters for availability and fit.
+*   **Consider Research/Internship Opportunities:** Identify potential research labs or industry internships in applied AI or systems for the summer semesters to gain practical experience.
+*   **Review Degree Audit:** Ensure this path aligns with all graduation requirements and major-specific course counts.
