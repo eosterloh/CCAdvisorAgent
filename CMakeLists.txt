@@ -94,6 +94,7 @@ target_link_libraries(scraper_script PRIVATE
   absl::status
   absl::statusor
   cpr::cpr
+  nlohmann_json::nlohmann_json
 )
 
 add_executable(
