@@ -165,6 +165,7 @@ add_executable(
   evals/evalsuite.cc
   evals/scoring.cc
   evals/reporting.cc
+  evals/llm_judge.cc
   src/app/conversation/chat_management.cc
   src/app/toolcalling/scraper_tool.cc
   src/app/toolcalling/retrieve_from_weaviate.cc
@@ -214,6 +215,7 @@ add_executable(
   expansion_tests_runner
   tests/expansion_unit_tests.cc
   evals/scoring.cc
+  evals/llm_judge.cc
   src/app/conversation/chat_management.cc
   src/app/toolcalling/scraper_tool.cc
   src/app/toolcalling/retrieve_from_weaviate.cc

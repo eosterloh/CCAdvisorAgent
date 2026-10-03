@@ -1,4 +1,9 @@
 #include "scoring.hpp"
+#include "absl/strings/match.h"
+#include "app/plan/plan_artifacts.hpp"
+
+#include <fstream>
+#include <sstream>
 
 absl::StatusOr<bool> HasPhase(const chat_manager &c, std::string_view phase) {
   for (const TraceEvent &event : c.getTraceEvents()) {
@@ -68,4 +73,22 @@ absl::StatusOr<bool> DeciderMarkedDone(const chat_manager &c) {
     }
   }
   return false;
+}
+
+absl::StatusOr<bool> MemoryUpdated(const chat_manager &c) {
+  return HasPhase(c, "memory");
+}
+
+absl::StatusOr<bool> PlanFileHasRequiredSections(std::string_view path) {
+  std::ifstream in{std::string(path)};
+  if (!in.is_open()) {
+    return false;
+  }
+  std::ostringstream buf;
+  buf << in.rdbuf();
+  return HasRequiredPlanSections(buf.str());
+}
+
+bool TranscriptContains(std::string_view transcript, std::string_view needle) {
+  return absl::StrContains(transcript, needle);
 }

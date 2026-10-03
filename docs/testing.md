@@ -14,7 +14,15 @@ From repository root:
 bash scripts/run_evals.sh
 ```
 
-Writes `evals/eval_results.jsonl` and prints pass rates by tag and metric.
+Writes `evals/eval_results.jsonl` with per-metric rows and prints pass rates by tag and metric.
+Loads `evals/cases.jsonl` plus `evals/cases/agentcases.jsonl`.
+`evals_runner` exits non-zero if any case fails.
+
+Quality checks now include:
+
+- deterministic phase/tool/latency/memory/plan-artifact/substring metrics
+- optional LLM-as-judge (`expected.llm_judge`)
+- multi-turn `followups` scripts
 
 ## Required environment variables
 

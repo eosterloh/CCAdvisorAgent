@@ -16,5 +16,8 @@ absl::StatusOr<bool> HasSuccessfulToolNamed(const chat_manager &c,
 absl::StatusOr<bool> NoFailedCriticalPhase(const chat_manager &c);
 absl::StatusOr<bool> ResponderProducedOutput(const chat_manager &c);
 absl::StatusOr<bool> DeciderMarkedDone(const chat_manager &c);
+absl::StatusOr<bool> MemoryUpdated(const chat_manager &c);
+absl::StatusOr<bool> PlanFileHasRequiredSections(std::string_view path);
+bool TranscriptContains(std::string_view transcript, std::string_view needle);
 
 #endif
