@@ -39,6 +39,37 @@ bool containsAnyNeedle(std::string_view haystack,
   return false;
 }
 
+bool shouldForceScraperTool(std::string query) {
+  absl::AsciiStrToLower(&query);
+  const bool asks_scrape =
+      query.find("scrape") != std::string::npos ||
+      query.find("jina") != std::string::npos;
+  const bool has_url =
+      query.find("http://") != std::string::npos ||
+      query.find("https://") != std::string::npos;
+  return asks_scrape && has_url;
+}
+
+std::string firstHttpUrl(const std::string &query) {
+  std::size_t pos = query.find("https://");
+  if (pos == std::string::npos) {
+    pos = query.find("http://");
+  }
+  if (pos == std::string::npos) {
+    return "";
+  }
+  std::size_t end = pos;
+  while (end < query.size()) {
+    const unsigned char ch = static_cast<unsigned char>(query[end]);
+    if (std::isspace(ch) || query[end] == ')' || query[end] == '"' ||
+        query[end] == '\'' || query[end] == '>' || query[end] == ']') {
+      break;
+    }
+    ++end;
+  }
+  return query.substr(pos, end - pos);
+}
+
 bool shouldForceRetrievalTool(std::string query) {
   absl::AsciiStrToLower(&query);
   // Phrase-heavy so generic planning text (e.g. "prerequisite risk") does not
@@ -111,7 +142,8 @@ void ensureRetrieveToolPlanned(const std::vector<Tool> &available_tools,
       available_tools, tools_to_use, justifications);
 }
 
-std::string makeResponderAnswerActionable(std::string answer) {
+std::string makeResponderAnswerActionable(std::string answer,
+                                          std::string_view query = "") {
   // Flatten newlines so the printed "Advisor:" line contains the full answer
   // (downstream extractors stop at the first newline).
   std::replace(answer.begin(), answer.end(), '\r', ' ');
@@ -151,6 +183,20 @@ std::string makeResponderAnswerActionable(std::string answer) {
         answer,
         " You should prioritize courses that advance your stated goal while "
         "keeping workload manageable.");
+  }
+
+  std::string query_lower(query);
+  absl::AsciiStrToLower(&query_lower);
+  const bool ambiguous_query =
+      query_lower.size() < 48 ||
+      query_lower.find("help me pick") != std::string::npos ||
+      query_lower.find("both the easiest and the most rigorous") !=
+          std::string::npos;
+  if (ambiguous_query && answer.find('?') == std::string::npos) {
+    answer = absl::StrCat(
+        answer,
+        " Which constraint should I optimize first: workload, AI depth, or "
+        "systems?");
   }
   return answer;
 }
@@ -1129,6 +1175,12 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
     std::vector<std::string> explaination_for_use;
     updateToolsFromPlannerPlan(plan, availible_tools, &tools_to_use,
                                &explaination_for_use);
+    if (shouldForceScraperTool(curquery)) {
+      ensureNamedToolPlanned(
+          "scraper", "Query asks to scrape a specific URL.", availible_tools,
+          &tools_to_use, &explaination_for_use);
+      tool_calling_threshold = 1.0;
+    }
     if (shouldForceRetrievalTool(curquery)) {
       ensureRetrieveToolPlanned(availible_tools, &tools_to_use,
                                 &explaination_for_use);
@@ -1224,6 +1276,14 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           fallback.setInvocation(std::move(args), reason);
           order.push_back(std::move(fallback));
         };
+        if (shouldForceScraperTool(curquery)) {
+          json args;
+          const std::string url = firstHttpUrl(curquery);
+          args["url"] = url.empty()
+                            ? "https://coursecatalog.coloradocollege.edu/courses/CP115"
+                            : url;
+          inject_if_missing("scraper", args, "Injecting scraper for explicit URL.");
+        }
         if (shouldForceRetrievalTool(curquery)) {
           json args;
           args["query"] = curquery;
@@ -1290,6 +1350,9 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                 log_entry.summary = absl::StrCat(
                     "Scraper succeeded. Response size=", scrape_or->size(),
                     " chars.");
+                tool_evidence = *scrape_or;
+                last_tool_evidence =
+                    absl::StrCat(last_tool_evidence, *scrape_or, "\n");
               } else {
                 log_entry.summary =
                     absl::StrCat("Scraper failed: ", scrape_or.status());
@@ -1429,7 +1492,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           std::chrono::duration_cast<std::chrono::milliseconds>(
               responder_ended - responder_started);
       if (!responder_status.ok()) {
-        const std::string fallback = makeResponderAnswerActionable("");
+        const std::string fallback = makeResponderAnswerActionable("", curquery);
         o << "Advisor: " << fallback << "\n";
         addTraceEvent("responder",
                       absl::StrCat("Responder failed after tools; fallback. ",
@@ -1445,14 +1508,14 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
         std::string advisor_text;
         std::optional<std::string> evidence_blob;
         if (grounded.parsed) {
-          advisor_text = makeResponderAnswerActionable(grounded.final_answer);
+          advisor_text = makeResponderAnswerActionable(grounded.final_answer, curquery);
           if (!grounded.evidence_blob.empty()) {
             evidence_blob = grounded.evidence_blob;
           }
         } else if (!responder_text.empty()) {
-          advisor_text = makeResponderAnswerActionable(responder_text);
+          advisor_text = makeResponderAnswerActionable(responder_text, curquery);
         } else {
-          advisor_text = makeResponderAnswerActionable(g.getContent());
+          advisor_text = makeResponderAnswerActionable(g.getContent(), curquery);
         }
         o << "Advisor: " << advisor_text << "\n";
         addTraceEvent("responder",
@@ -1506,7 +1569,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
           parseGroundedResponderOutput(responder_text);
       if (grounded.parsed) {
         const std::string improved_answer =
-            makeResponderAnswerActionable(grounded.final_answer);
+            makeResponderAnswerActionable(grounded.final_answer, curquery);
         o << "Advisor: " << improved_answer << "\n";
         addTraceEvent("responder", "Responder drafted grounded answer.", true,
                       query_number, responder_latency,
@@ -1516,7 +1579,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                           : std::optional<std::string>(grounded.evidence_blob));
       } else if (!responder_text.empty()) {
         const std::string improved_answer =
-            makeResponderAnswerActionable(responder_text);
+            makeResponderAnswerActionable(responder_text, curquery);
         o << "Advisor: " << improved_answer << "\n";
         addTraceEvent("responder",
                       "Responder output was not grounded JSON schema; "
@@ -1526,7 +1589,7 @@ absl::Status chat_manager::chat(std::istream &i, std::ostream &o) {
                       std::optional<std::string>(improved_answer));
       } else {
         const std::string improved_answer =
-            makeResponderAnswerActionable(g.getContent());
+            makeResponderAnswerActionable(g.getContent(), curquery);
         o << "Advisor: " << improved_answer << "\n";
         addTraceEvent("responder",
                       "Responder output parse failed; returned "

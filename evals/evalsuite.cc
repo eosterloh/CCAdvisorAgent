@@ -91,6 +91,9 @@ Tier 3 (stretch):
 
 #include "../include/app/common/types.hpp"
 #include "app/conversation/chat_management.hpp"
+#include "app/plan/plan_artifacts.hpp"
+#include "evalsuite.hpp"
+#include "llm_judge.hpp"
 #include "reporting.hpp"
 #include "scoring.hpp"
 
@@ -100,6 +103,7 @@ Tier 3 (stretch):
 #include "nlohmann/json.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -116,6 +120,7 @@ struct EvalTestCase {
   std::string query;
   json expected;
   std::vector<std::string> tags;
+  std::vector<std::string> followups;
 };
 
 struct EvalCaseResult {
@@ -142,7 +147,7 @@ getTests(const std::string &path = "evals/cases.jsonl") {
 
   std::string line;
   while (std::getline(input, line)) {
-    if (line.empty()) {
+    if (line.empty() || line.rfind("//", 0) == 0 || line.rfind("#", 0) == 0) {
       continue;
     }
     const json row = json::parse(line, nullptr, false);
@@ -155,6 +160,27 @@ getTests(const std::string &path = "evals/cases.jsonl") {
     t.mode = row.value("mode", "test");
     t.query = row.value("query", "");
     t.expected = row.value("expected", json::object());
+    if (row.contains("queries") && row.at("queries").is_array()) {
+      t.query.clear();
+      t.followups.clear();
+      for (const json::value_type &q : row.at("queries")) {
+        if (!q.is_string()) {
+          continue;
+        }
+        if (t.query.empty()) {
+          t.query = q.get<std::string>();
+        } else {
+          t.followups.push_back(q.get<std::string>());
+        }
+      }
+    }
+    if (row.contains("followups") && row.at("followups").is_array()) {
+      for (const json::value_type &q : row.at("followups")) {
+        if (q.is_string()) {
+          t.followups.push_back(q.get<std::string>());
+        }
+      }
+    }
     if (row.contains("tags") && row.at("tags").is_array()) {
       for (const json::value_type &tag : row.at("tags")) {
         if (tag.is_string()) {
@@ -170,6 +196,10 @@ getTests(const std::string &path = "evals/cases.jsonl") {
 std::string buildInputScript(const EvalTestCase &test) {
   std::string script = test.query;
   script += "\n";
+  for (const std::string &followup : test.followups) {
+    script += followup;
+    script += "\n";
+  }
   return script;
 }
 
@@ -326,8 +356,36 @@ MetricCheck evaluateActionability(const std::string &advisor_text) {
   return {true, "actionability passed"};
 }
 
-EvalCaseResult runOneTest(const EvalTestCase &test) {
+MetricCheck evaluateClarification(const std::string &advisor_text) {
+  if (advisor_text.empty()) {
+    return {false, "clarification failed: missing advisor response"};
+  }
+  const std::string lower = absl::AsciiStrToLower(advisor_text);
+  const std::vector<std::string> clarify_terms = {
+      "?", "clarif", "which", "could you", "tell me", "more about", "prefer"};
+  if (!containsAny(lower, clarify_terms)) {
+    return {false, "clarification failed: no question or narrowing ask"};
+  }
+  return {true, "clarification passed"};
+}
+
+EvalReportedCase runOneTest(const EvalTestCase &test) {
   std::cout << "[eval] Starting case: " << test.id << std::endl;
+  EvalReportedCase row;
+  row.id = test.id;
+  row.tags = test.tags;
+  row.passed = true;
+
+  auto record = [&](const std::string &name, bool pass, const std::string &reason) {
+    row.metrics.push_back({name, pass, reason});
+    if (!pass) {
+      row.passed = false;
+      if (row.reason.empty()) {
+        row.reason = reason;
+      }
+    }
+  };
+
   chat_manager manager;
   if (test.mode == "test") {
     manager.loadTestProfilePreset();
@@ -342,16 +400,17 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
   const std::string advisor_text = extractAdvisorText(transcript);
 
   if (!status.ok()) {
+    record("chat", false, absl::StrCat("chat() failed: ", status.ToString()));
     std::cout << "[eval] Case failed early: " << test.id
               << " reason=chat() failed" << std::endl;
-    return {test.id, false, absl::StrCat("chat() failed: ", status)};
+    return row;
   }
+  record("chat", true, "chat() returned ok");
+
   const absl::StatusOr<bool> critical = NoFailedCriticalPhase(manager);
-  if (!critical.ok() || !*critical) {
-    std::cout << "[eval] Case failed: " << test.id
-              << " reason=critical phase failure" << std::endl;
-    return {test.id, false, "One or more critical phases failed."};
-  }
+  record("critical_phases", critical.ok() && *critical,
+         (critical.ok() && *critical) ? "no critical phase failures"
+                                      : "One or more critical phases failed.");
 
   if (test.expected.contains("required_phases") &&
       test.expected.at("required_phases").is_array()) {
@@ -361,14 +420,12 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       }
       const absl::StatusOr<bool> has_phase =
           HasPhase(manager, phase.get<std::string>());
-      if (!has_phase.ok() || !*has_phase) {
-        std::cout << "[eval] Case failed: " << test.id
-                  << " reason=missing phase " << phase.get<std::string>()
-                  << std::endl;
-        return {
-            test.id, false,
-            absl::StrCat("Missing required phase: ", phase.get<std::string>())};
-      }
+      record(absl::StrCat("phase:", phase.get<std::string>()),
+             has_phase.ok() && *has_phase,
+             (has_phase.ok() && *has_phase)
+                 ? "required phase present"
+                 : absl::StrCat("Missing required phase: ",
+                                phase.get<std::string>()));
     }
   }
 
@@ -380,22 +437,23 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       }
       const absl::StatusOr<bool> has_phase =
           HasPhase(manager, phase.get<std::string>());
-      if (has_phase.ok() && *has_phase) {
-        return {test.id, false,
-                absl::StrCat("Forbidden phase was present: ",
-                             phase.get<std::string>())};
-      }
+      const bool forbidden_present = has_phase.ok() && *has_phase;
+      record(absl::StrCat("forbidden:", phase.get<std::string>()),
+             !forbidden_present,
+             forbidden_present
+                 ? absl::StrCat("Forbidden phase was present: ",
+                                phase.get<std::string>())
+                 : "forbidden phase absent");
     }
   }
 
   if (test.expected.contains("min_successful_tools") &&
       test.expected.at("min_successful_tools").is_number_integer()) {
     const int min_tools = test.expected.at("min_successful_tools").get<int>();
-    if (countSuccessfulTools(events) < min_tools) {
-      std::cout << "[eval] Case failed: " << test.id
-                << " reason=insufficient successful tools" << std::endl;
-      return {test.id, false, "Not enough successful tool calls."};
-    }
+    const bool enough = countSuccessfulTools(events) >= min_tools;
+    record("min_successful_tools", enough,
+           enough ? "enough successful tools"
+                  : "Not enough successful tool calls.");
   }
 
   if (test.expected.contains("require_tool_name") &&
@@ -404,14 +462,11 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
         test.expected.at("require_tool_name").get<std::string>();
     const absl::StatusOr<bool> named =
         HasSuccessfulToolNamed(manager, required_tool);
-    if (!named.ok() || !*named) {
-      std::cout << "[eval] Case failed: " << test.id
-                << " reason=required tool missing " << required_tool
-                << std::endl;
-      return {test.id, false,
-              absl::StrCat("Required tool was not successfully called: ",
-                           required_tool)};
-    }
+    record(absl::StrCat("tool:", required_tool), named.ok() && *named,
+           (named.ok() && *named)
+               ? "required tool succeeded"
+               : absl::StrCat("Required tool was not successfully called: ",
+                              required_tool));
   }
 
   if (test.expected.contains("max_phase_latency_ms") &&
@@ -425,12 +480,10 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       const absl::StatusOr<bool> under = PhaseLatencyUnder(
           manager, it.key(),
           std::chrono::milliseconds(it.value().get<int>()));
-      if (!under.ok() || !*under) {
-        std::cout << "[eval] Case failed: " << test.id
-                  << " reason=latency exceeded for " << it.key() << std::endl;
-        return {test.id, false,
-                absl::StrCat("Latency limit exceeded for phase: ", it.key())};
-      }
+      record(absl::StrCat("latency:", it.key()), under.ok() && *under,
+             (under.ok() && *under)
+                 ? "latency within budget"
+                 : absl::StrCat("Latency limit exceeded for phase: ", it.key()));
     }
   }
 
@@ -438,11 +491,9 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       test.expected.at("must_finish_with_decider_done").is_boolean() &&
       test.expected.at("must_finish_with_decider_done").get<bool>()) {
     const absl::StatusOr<bool> done = DeciderMarkedDone(manager);
-    if (!done.ok() || !*done) {
-      std::cout << "[eval] Case failed: " << test.id
-                << " reason=decider done not observed" << std::endl;
-      return {test.id, false, "Decider did not report done=true."};
-    }
+    record("decider_done", done.ok() && *done,
+           (done.ok() && *done) ? "decider marked done"
+                                : "Decider did not report done=true.");
   }
 
   const bool expect_input_rejection =
@@ -451,12 +502,10 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
       test.expected.at("expect_input_rejection").get<bool>();
   if (expect_input_rejection) {
     const std::string tl = absl::AsciiStrToLower(transcript);
-    if (!absl::StrContains(tl, "please enter a question")) {
-      std::cout << "[eval] Case failed: " << test.id
-                << " reason=missing input rejection guidance" << std::endl;
-      return {test.id, false,
-              "Expected prompt to reject empty input (no guidance text)."};
-    }
+    const bool guided = absl::StrContains(tl, "please enter a question");
+    record("input_rejection", guided,
+           guided ? "empty input handled"
+                  : "Expected prompt to reject empty input (no guidance text).");
     bool saw_input_trace = false;
     for (const TraceEvent &e : events) {
       if (e.phase == "input") {
@@ -464,65 +513,143 @@ EvalCaseResult runOneTest(const EvalTestCase &test) {
         break;
       }
     }
-    if (!saw_input_trace) {
-      std::cout << "[eval] Case failed: " << test.id
-                << " reason=missing input phase trace" << std::endl;
-      return {test.id, false, "Expected input-phase trace on empty query."};
+    record("input_trace", saw_input_trace,
+           saw_input_trace ? "input phase present"
+                           : "Expected input-phase trace on empty query.");
+    if (row.passed) {
+      row.reason = "pass (empty input handled)";
+      std::cout << "[eval] Case passed: " << test.id
+                << " (input rejection)" << std::endl;
+    } else {
+      std::cout << "[eval] Case failed: " << test.id << " reason=" << row.reason
+                << std::endl;
     }
-    std::cout << "[eval] Case passed: " << test.id
-              << " (input rejection)" << std::endl;
-    return {test.id, true, "pass (empty input handled)"};
+    return row;
   }
+
+  const absl::StatusOr<bool> responder = ResponderProducedOutput(manager);
+  record("responder_output", responder.ok() && *responder,
+         (responder.ok() && *responder) ? "responder produced output"
+                                        : "responder did not produce output");
 
   const MetricCheck helpfulness = evaluateHelpfulness(advisor_text);
-  if (!helpfulness.pass) {
-    std::cout << "[eval] Case failed: " << test.id
-              << " reason=helpfulness metric" << std::endl;
-    return {test.id, false, helpfulness.reason};
-  }
+  record("helpfulness", helpfulness.pass, helpfulness.reason);
 
   const MetricCheck faithfulness = evaluateFaithfulness(events, test);
-  if (!faithfulness.pass) {
-    std::cout << "[eval] Case failed: " << test.id
-              << " reason=faithfulness metric" << std::endl;
-    return {test.id, false, faithfulness.reason};
-  }
+  record("faithfulness", faithfulness.pass, faithfulness.reason);
 
   const MetricCheck actionability = evaluateActionability(advisor_text);
-  if (!actionability.pass) {
-    std::cout << "[eval] Case failed: " << test.id
-              << " reason=actionability metric" << std::endl;
-    return {test.id, false, actionability.reason};
+  record("actionability", actionability.pass, actionability.reason);
+
+  if (test.expected.contains("require_memory") &&
+      test.expected.at("require_memory").is_boolean() &&
+      test.expected.at("require_memory").get<bool>()) {
+    const absl::StatusOr<bool> memory = MemoryUpdated(manager);
+    record("memory", memory.ok() && *memory,
+           (memory.ok() && *memory) ? "memory updated"
+                                    : "memory phase missing");
   }
 
-  std::cout << "[eval] Case passed: " << test.id << std::endl;
-  return {test.id, true, "pass"};
+  if (test.expected.contains("require_clarification") &&
+      test.expected.at("require_clarification").is_boolean() &&
+      test.expected.at("require_clarification").get<bool>()) {
+    const MetricCheck clarify = evaluateClarification(advisor_text);
+    record("clarification", clarify.pass, clarify.reason);
+  }
+
+  if (test.expected.contains("require_substrings") &&
+      test.expected.at("require_substrings").is_array()) {
+    for (const json::value_type &needle : test.expected.at("require_substrings")) {
+      if (!needle.is_string()) {
+        continue;
+      }
+      const std::string needle_text = needle.get<std::string>();
+      std::string haystack = transcript;
+      const std::size_t qpos = haystack.find(test.query);
+      if (qpos != std::string::npos) {
+        haystack.erase(qpos, test.query.size());
+      }
+      const bool found = TranscriptContains(advisor_text, needle_text) ||
+                         TranscriptContains(haystack, needle_text);
+      record(absl::StrCat("substring:", needle_text), found,
+             found ? "substring present"
+                   : absl::StrCat("Missing required substring: ", needle_text));
+    }
+  }
+
+  if (test.expected.contains("require_plan_file") &&
+      test.expected.at("require_plan_file").is_boolean() &&
+      test.expected.at("require_plan_file").get<bool>()) {
+    const absl::StatusOr<bool> plan_ok = PlanFileHasRequiredSections("plan.md");
+    record("plan_md", plan_ok.ok() && *plan_ok,
+           (plan_ok.ok() && *plan_ok)
+               ? "plan.md has required sections"
+               : "plan.md missing or missing required sections");
+  }
+
+  if (test.expected.contains("require_plan_pdf") &&
+      test.expected.at("require_plan_pdf").is_boolean() &&
+      test.expected.at("require_plan_pdf").get<bool>()) {
+    const bool pdf_ok = std::filesystem::exists("plan.pdf");
+    record("plan_pdf", pdf_ok,
+           pdf_ok ? "plan.pdf written" : "plan.pdf missing");
+  }
+
+  if (test.expected.contains("llm_judge") &&
+      test.expected.at("llm_judge").is_boolean() &&
+      test.expected.at("llm_judge").get<bool>()) {
+    std::string evidence;
+    for (const TraceEvent &event : events) {
+      if (event.evidence.has_value() && !event.evidence->empty()) {
+        evidence = *event.evidence;
+      }
+    }
+    const EvalMetricResult judged =
+        RunLlmJudge(test.query, advisor_text, evidence);
+    record(judged.name, judged.pass, judged.reason);
+  }
+
+  if (row.passed) {
+    row.reason = "pass";
+    std::cout << "[eval] Case passed: " << test.id << std::endl;
+  } else {
+    std::cout << "[eval] Case failed: " << test.id << " reason=" << row.reason
+              << std::endl;
+  }
+  return row;
 }
 
 } // namespace
 
-std::string evalsuite() {
-  const std::vector<EvalTestCase> testcases = getTests();
+EvalSuiteOutcome RunEvalSuite() {
+  std::vector<EvalTestCase> testcases = getTests("evals/cases.jsonl");
+  const std::vector<EvalTestCase> agent_cases =
+      getTests("evals/cases/agentcases.jsonl");
+  testcases.insert(testcases.end(), agent_cases.begin(), agent_cases.end());
+  EvalSuiteOutcome outcome;
   if (testcases.empty()) {
-    return "No eval cases loaded from evals/cases.jsonl";
+    outcome.summary = "No eval cases loaded from evals/cases.jsonl";
+    return outcome;
   }
 
-  std::cout << "[eval] Loaded " << testcases.size() << " test cases." << std::endl;
+  std::cout << "[eval] Loaded " << testcases.size() << " test cases."
+            << std::endl;
   std::vector<EvalReportedCase> reported;
   for (const EvalTestCase &test : testcases) {
-    const EvalCaseResult result = runOneTest(test);
-    EvalReportedCase row;
-    row.id = result.id;
-    row.passed = result.passed;
-    row.reason = result.reason;
-    row.tags = test.tags;
-    row.metrics.push_back({"case", result.passed, result.reason});
+    const EvalReportedCase row = runOneTest(test);
     reported.push_back(row);
+    ++outcome.total;
+    if (row.passed) {
+      ++outcome.passed;
+    }
   }
   const absl::Status write_status =
       WriteEvalResultsJsonl("evals/eval_results.jsonl", reported);
   if (!write_status.ok()) {
     std::cerr << write_status << std::endl;
   }
-  return FormatEvalSummary(reported);
+  outcome.summary = FormatEvalSummary(reported);
+  return outcome;
 }
+
+std::string evalsuite() { return RunEvalSuite().summary; }

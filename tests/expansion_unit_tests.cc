@@ -64,6 +64,14 @@ int main() {
   event.query_id = 1;
   event.timestamp = 0;
   manager.addTestTraceEvent(event);
+  TraceEvent memory;
+  memory.phase = "memory";
+  memory.event_summary = "Updated long and short summaries.";
+  memory.success = true;
+  memory.latency = std::chrono::milliseconds(3);
+  memory.query_id = 1;
+  memory.timestamp = 0;
+  manager.addTestTraceEvent(memory);
   absl::StatusOr<bool> has_planner = HasPhase(manager, "planner");
   expect(has_planner.ok() && *has_planner, "HasPhase planner");
   absl::StatusOr<bool> under =
@@ -71,6 +79,18 @@ int main() {
   expect(under.ok() && *under, "PhaseLatencyUnder");
   absl::StatusOr<bool> critical = NoFailedCriticalPhase(manager);
   expect(critical.ok() && *critical, "NoFailedCriticalPhase");
+  absl::StatusOr<bool> memory_ok = MemoryUpdated(manager);
+  expect(memory_ok.ok() && *memory_ok, "MemoryUpdated");
+  expect(TranscriptContains("Advisor: take CP341 next", "CP341"),
+         "TranscriptContains");
+  const fs::path md = fs::temp_directory_path() / "ccadvisor_plan_test.md";
+  const absl::Status md_status = WriteAcademicPlanMarkdown(good_plan, md.string());
+  expect(md_status.ok(), "markdown write ok");
+  if (md_status.ok()) {
+    absl::StatusOr<bool> sections = PlanFileHasRequiredSections(md.string());
+    expect(sections.ok() && *sections, "PlanFileHasRequiredSections");
+    fs::remove(md);
+  }
 
   if (failures != 0) {
     std::cerr << failures << " expansion unit tests failed.\n";

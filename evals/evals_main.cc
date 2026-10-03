@@ -1,9 +1,12 @@
-#include <iostream>
-#include <string>
+#include "evalsuite.hpp"
 
-std::string evalsuite();
+#include <iostream>
 
 int main() {
-  std::cout << evalsuite() << '\n';
-  return 0;
+  const EvalSuiteOutcome outcome = RunEvalSuite();
+  std::cout << outcome.summary << '\n';
+  if (outcome.total == 0) {
+    return 1;
+  }
+  return outcome.passed == outcome.total ? 0 : 1;
 }
